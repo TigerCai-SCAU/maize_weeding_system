@@ -1,0 +1,19 @@
+hand_eye_calibrator:
+  calibration_mode: "axxb"  # axxb or planar
+  only_optimize_rotation: false
+  max_iterations: 1000
+  residual_threshold: 0.00000001
+  time_tolerance_seconds: 0.1
+  B_time_offset_seconds: 0.0
+  max_interpolation_gap_seconds: 0.2
+  min_motion_translation: 0.2
+  min_motion_rotation_deg: 1.0
+  skip: 1
+  T_A_B_init: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  # Input format: timestamp x y z qx qy qz qw
+  # A and B follow the original repository convention. For LiDAR/RTK use:
+  # A_poses_file: Fast-LIVO2/LiDAR trajectory
+  # B_poses_file: RTK/INS trajectory
+  A_poses_file: "data/lidar_pose.txt"
+  B_poses_file: "data/rtk_pose.txt"
+  save_result_file: "data/calib_result.txt"

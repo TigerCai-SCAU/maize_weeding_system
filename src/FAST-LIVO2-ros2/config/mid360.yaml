@@ -1,0 +1,126 @@
+/**:
+  ros__parameters:
+    common: 
+      img_topic: "/left_camera/image"  
+      lid_topic: "/livox/lidar"  
+      imu_topic: "/livox/imu"  
+      img_en: 1  
+      lidar_en: 1 
+      ros_driver_bug_fix: false  
+
+    gnss_constraint:
+      enable: false
+      odom_topic: "/gnss/odom_gated"
+      max_age: 0.3
+      gain: 0.05
+      max_correction: 0.05
+      reject_threshold: 2.0
+      min_align_distance: 2.0
+      use_z: false
+      use_fixed_transform: true
+      fixed_anchor_at_start: true
+      fixed_yaw_deg: 86.963519
+      fixed_translation_x: 2.735186
+      fixed_translation_y: -0.386661
+      fixed_translation_z: 0.0
+
+    wheel_constraint:
+      enable: false
+      odom_topic: "/wheel/odom"
+      max_age: 0.2
+      gain: 0.1
+      max_velocity_correction: 0.1
+      max_speed: 3.0
+      zero_lateral: true
+      zero_vertical: true
+
+    extrin_calib:
+      extrinsic_T: [ -0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      Rcl: [ -0.062419,  -0.997784,  -0.023043,
+              0.539422,  -0.014301,  -0.841914,
+              0.839719,  -0.064981,   0.539119]
+      Pcl: [  0.011203,  -0.202398,   0.514424]
+
+    time_offset:  
+      imu_time_offset: 0.0  # IMU 时间偏移（单位：秒）
+      img_time_offset: 0.0  
+      exposure_time_init: 0.0  
+
+    preprocess:  
+      point_filter_num: 1  
+      filter_size_surf: 0.1  # 表面滤波器尺寸（单位：米）
+      lidar_type: 1  # LiDAR 类型（1：Livox Avia / Mid360）
+      scan_line: 4  # 扫描线数量（Avia：6，Mid360：4）
+      blind: 0.8  # LiDAR 盲区范围（单位：米）
+
+    vio: 
+      max_iterations: 5 
+      outlier_threshold: 1000  # 离群点阈值
+      img_point_cov: 100  
+      patch_size: 8  
+      patch_pyrimid_level: 4  
+      normal_en: true 
+      raycast_en: false  
+      inverse_composition_en: false  
+      exposure_estimate_en: true  
+      inv_expo_cov: 0.1  
+
+    imu:  
+      imu_en: true  # 是否启用 IMU（true：启用，false：禁用）
+      imu_int_frame: 30  
+      acc_cov: 0.5  
+      gyr_cov: 0.3 
+      b_acc_cov: 0.0001  
+      b_gyr_cov: 0.0001  
+
+    lio:  
+      max_iterations: 5  # 最大迭代次数
+      dept_err: 0.02 
+      beam_err: 0.05  
+      min_eigen_value: 0.0025  
+      voxel_size: 0.5 
+      max_layer: 2 
+      max_points_num: 50  
+      layer_init_num: [5, 5, 5, 5, 5]  
+
+    local_map: 
+      map_sliding_en: true 
+      half_map_size: 2 
+      sliding_thresh: 5.0  
+
+    uav:  # 无人机相关参数
+      imu_rate_odom: false  
+      gravity_align_en: true  
+
+    publish:  
+      dense_map_en: True 
+      pub_effect_point_en: false  
+      pub_plane_en: false  
+      pub_scan_num: 1  
+      blind_rgb_points: 0.0  
+
+    semantic_sync:
+      enable: true
+      use_vio_time: true
+
+      publish_body_cloud: true
+      publish_world_cloud: true
+      publish_odom: true
+
+      image_topic: "/fastlivo/semantic_sync/image"
+      cloud_body_topic: "/fastlivo/semantic_sync/cloud_body"
+      cloud_world_topic: "/fastlivo/semantic_sync/cloud_world"
+      odom_topic: "/fastlivo/semantic_sync/odom"
+  
+    evo:  
+      seq_name: "CBD_Building_01" 
+      pose_output_en: false 
+
+    pcd_save:  
+      pcd_save_en: true  # 是否启用点云保存
+      colmap_output_en: false  
+      filter_size_pcd: 0.15  
+      interval: -1  

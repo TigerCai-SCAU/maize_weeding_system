@@ -1,0 +1,45 @@
+# ROS2 build outputs
+build/
+install/
+log/
+
+# bags and data
+*.bag
+*.db3
+*.mcap
+*_bag/
+calib_traj_bag/
+replay_eval_bag/
+replay_no_gnss/
+replay_with_gnss/
+replay_with_gnss_soft/
+
+# compressed files
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# model/data files
+*.pt
+*.pth
+*.onnx
+*.engine
+*.pcd
+*.ply
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+
+# Python
+__pycache__/
+*.pyc
+
+# editor
+.vscode/
+.idea/
+EOF
