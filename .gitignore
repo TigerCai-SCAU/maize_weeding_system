@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.pytest_cache/
 
 # CMake
 CMakeFiles/
@@ -34,6 +35,14 @@ Makefile
 
 # Runtime logs
 *.log
+
+# Backup / generated binaries
+*.bak
+*.bak_*
+*.so
+*.a
+*.o
+*.out
 
 # IDE
 .vscode/

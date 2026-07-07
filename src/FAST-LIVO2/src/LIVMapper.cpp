@@ -518,21 +518,14 @@ void LIVMapper::handleLIO()
     RGBpointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
   }
   *pcl_w_wait_pub = *laserCloudWorld;
-	
-  PointCloudXYZI::Ptr cloud_for_seedling = nullptr;
-
+  // Publish only the current deskewed body-frame cloud for seedling localization.
+  // Do not fall back to laserCloudFullRes here, because it can be in a different frame.
   if (feats_down_body && !feats_down_body->empty())
   {
-    cloud_for_seedling = feats_down_body;
+    publish_deskew_cloud_body(
+        feats_down_body,
+        LidarMeasures.last_lio_update_time);
   }
-  else
-  {
-    cloud_for_seedling = laserCloudFullRes;
-  }
-
-  publish_deskew_cloud_body(
-      cloud_for_seedling,
-      LidarMeasures.last_lio_update_time);
     
   publish_frame_world(pubLaserCloudFullRes, vio_manager);
   if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);

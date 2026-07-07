@@ -17,9 +17,9 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='nvidia',
-    maintainer_email='nvidia@todo.todo',
-    description='Seedling SEP 3D localization and landmark mapping from FAST-LIVO2 synchronized outputs.',
+    maintainer='HU CU',
+    maintainer_email='1619675251@qq.com',
+    description='Seedling SEP 3D localization and landmark mapping using external image/cloud/odom synchronization.',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
