@@ -51,3 +51,9 @@ Makefile
 # OS
 .DS_Store
 Thumbs.db
+
+# vikit_common generated outputs, keep only placeholders
+src/rpg_vikit/vikit_common/bin/*
+!src/rpg_vikit/vikit_common/bin/.gitkeep
+src/rpg_vikit/vikit_common/lib/*
+!src/rpg_vikit/vikit_common/lib/.gitkeep
