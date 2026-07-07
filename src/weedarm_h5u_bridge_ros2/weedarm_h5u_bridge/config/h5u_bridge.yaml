@@ -1,0 +1,18 @@
+h5u_csp_bridge:
+  ros__parameters:
+    plc_ip: "192.168.1.88"
+    plc_port: 502
+    unit: 1
+    addr_offset: 0
+    word_order: "lo_hi"
+    write_rate_hz: 20.0
+    point_count: 64
+    point_dt_ticks: 5
+    lookahead_ticks: 50
+    timeout_ticks: 125
+    plc_tick_sec: 0.004
+    trajectory_timeout_sec: 0.30
+    use_fallback_when_no_traj: false
+    y_limit_m: 0.20
+    z_min_m: -0.40
+    z_max_m: -0.02

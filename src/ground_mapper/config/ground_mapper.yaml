@@ -1,0 +1,45 @@
+ground_mapper_node:
+  ros__parameters:
+    # FAST-LIVO registered point cloud. First version uses this directly.
+    cloud_topic: /cloud_registered
+    odom_topic: /aft_mapped_to_init
+
+    ground_points_topic: /ground/points
+    non_ground_points_topic: /ground/non_ground_points
+    elevation_points_topic: /ground/elevation_points
+    elevation_markers_topic: /ground/elevation_markers
+
+    # If true, x/y ROI is centered on odom pose and aligned with odom yaw.
+    # If no odom arrives yet, node falls back to fixed-frame ROI temporarily.
+    use_odom_roi: true
+
+    # ROI in body-local coordinates when use_odom_roi=true.
+    # x is forward, y is left/right if /aft_mapped_to_init orientation is correct.
+    roi_x_min: -1.0
+    roi_x_max: 4.0
+    roi_y_min: -1.5
+    roi_y_max: 1.5
+
+    # z is in the cloud/map frame. Adjust after checking /cloud_registered z range.
+    roi_z_min: -3.0
+    roi_z_max: 1.0
+
+    # Grid ground estimator.
+    grid_resolution: 0.03
+    height_percentile: 20.0
+    min_points_per_cell: 3
+
+    # A point is treated as ground if it is close to the low-percentile ground height.
+    ground_keep_above: 0.04
+    ground_keep_below: 0.03
+
+    # A point above the estimated ground by this threshold is published as non-ground.
+    non_ground_above: 0.06
+
+    # Performance / visualization.
+    process_every_n_clouds: 1
+    max_points_per_cloud: 0      # 0 = no cap; set 30000 if CPU is high
+    publish_non_ground: true
+    publish_elevation_markers: true
+    marker_max_cells: 4000
+    log_debug: true

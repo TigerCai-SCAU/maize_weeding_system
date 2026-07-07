@@ -1,0 +1,44 @@
+# ROS2 build outputs
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ROS bag / data
+*.bag
+*.db3
+*.mcap
+
+# ML models
+*.pt
+*.onnx
+*.engine
+*.weights
+
+# Point cloud / map outputs
+*.pcd
+*.ply
+*.las
+*.csv
+
+# Runtime logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
