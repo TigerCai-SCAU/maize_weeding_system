@@ -50,13 +50,29 @@ yolo_sep_localizer:
     extT: [-0.011, -0.02329, 0.04412]
 
     # Pixel neighborhood around SEP used to pick projected LiDAR points.
-    search_radius_px: 14.0
-    min_candidate_points: 8
+    search_radius_px: 30.0
+    min_candidate_points: 3
     cloud_stride: 1
     min_depth: 0.05
     max_depth: 8.0
     use_plane_intersection: true
     max_plane_rmse: 0.05
+
+    # 橙色乒乓球测试参数。color_sep_localizer 使用这些参数，YOLO 节点会忽略。
+    orange_h_low: 5
+    orange_h_high: 28
+    orange_s_low: 80
+    orange_v_low: 80
+
+    color_min_area: 80
+    color_max_area: 200000
+    color_min_fill_ratio: 0.20
+    color_point_v_ratio: 0.88
+    color_morph_kernel: 5
+    color_debug_log_every: 30
+
+    publish_debug_mask: true
+    debug_mask_topic: /seedling/orange_mask
 
 seedling_mapper:
   ros__parameters:
