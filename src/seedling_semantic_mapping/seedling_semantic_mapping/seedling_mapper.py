@@ -100,6 +100,12 @@ class SeedlingMapper(Node):
             f"SeedlingMapper started. obs={self.observation_topic}, map_points={self.map_points_topic}, gate_xy={self.gate_xy:.3f}, csv={self.csv_path}"
         )
 
+        # 周期发布苗点地图，避免 RViz 后启动时收不到 VOLATILE 消息
+        self.map_publish_timer = self.create_timer(
+            1.0,
+            self.publish_map_timer_cb,
+        )
+
     def prune_stamp_history(self) -> None:
         while len(self.stamp_history) > self.max_same_stamp_history:
             old = self.stamp_history.pop(0)
@@ -201,6 +207,15 @@ class SeedlingMapper(Node):
         self.publish_map_points(msg.header.stamp)
         if self.save_every_update:
             self.save_csv()
+
+    def publish_map_timer_cb(self) -> None:
+        """周期发布当前内存中的苗点地图。"""
+        if not self.landmarks:
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        self.publish_markers(stamp)
+        self.publish_map_points(stamp)
 
     def publish_markers(self, stamp: Time) -> None:
         ma = MarkerArray()
