@@ -225,22 +225,22 @@ def generate_launch_description():
         DeclareLaunchArgument("ground_mapper_pkg", default_value="ground_mapper"),
 
         # Launch file names. Use "auto" if you are unsure.
-        DeclareLaunchArgument("livox_launch", default_value="auto"),
-        DeclareLaunchArgument("camera_launch", default_value="auto"),
-        DeclareLaunchArgument("fast_livo_launch", default_value="auto"),
-        DeclareLaunchArgument("perception_launch", default_value="seedling_pipeline.launch.py"),
+        DeclareLaunchArgument("livox_launch", default_value="msg_MID360_launch.py"),
+        DeclareLaunchArgument("camera_launch", default_value="single.launch.py"),
+        DeclareLaunchArgument("fast_livo_launch", default_value="mapping_mid360.launch.py"),
+        DeclareLaunchArgument("perception_launch", default_value="orange_ball_pipeline.launch.py"),
         DeclareLaunchArgument("ground_mapper_launch", default_value="ground_mapper.launch.py"),
 
         # Optional perception config.
         DeclareLaunchArgument("perception_config", default_value=""),
 
         # Startup delays in seconds.
-        DeclareLaunchArgument("livox_delay", default_value="0.0"),
-        DeclareLaunchArgument("camera_delay", default_value="1.0"),
-        DeclareLaunchArgument("fast_livo_delay", default_value="4.0"),
-        DeclareLaunchArgument("perception_delay", default_value="8.0"),
+        DeclareLaunchArgument("livox_delay", default_value="5.0"),
+        DeclareLaunchArgument("camera_delay", default_value="5.0"),
+        DeclareLaunchArgument("fast_livo_delay", default_value="0.0"),
+        DeclareLaunchArgument("perception_delay", default_value="0.0"),
         DeclareLaunchArgument("ground_mapper_delay", default_value="10.0"),
-        DeclareLaunchArgument("rviz_delay", default_value="12.0"),
+        DeclareLaunchArgument("rviz_delay", default_value="18.0"),
 
         # RViz.
         DeclareLaunchArgument("rviz_config", default_value=""),

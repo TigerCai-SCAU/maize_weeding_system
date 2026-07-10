@@ -24,7 +24,7 @@ def generate_launch_description():
             package='miivii_gmsl_camera',
             executable='miivii_gmsl_camera_node',
             name='miivii_gmsl_camera_node',
-            output='log',
+            output='screen',
             parameters=[{
                 'video0.active': False,
                 'video0.camera_res': '1920x1080',

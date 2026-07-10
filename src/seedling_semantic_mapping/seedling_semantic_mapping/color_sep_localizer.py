@@ -23,8 +23,9 @@ from typing import List
 import numpy as np
 import rclpy
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import PointStamped
 
-from .yolo_sep_localizer import YoloSepLocalizer, SepDetection
+from .yolo_sep_localizer import YoloSepLocalizer, SepDetection, image_msg_to_numpy, stamp_to_sec
 
 
 class ColorSepLocalizer(YoloSepLocalizer):
@@ -169,6 +170,87 @@ class ColorSepLocalizer(YoloSepLocalizer):
                 self.get_logger().info("orange detections=0")
 
         return detections
+
+    def image_cb(self, msg: Image) -> None:
+        """
+        调试版回调：
+        1. 收到图像后先做颜色分割并发布 /seedling/orange_mask
+        2. 再去找最近 cloud/odom
+        3. 同步成功后再发布 3D observation
+        """
+        self.frame_count += 1
+
+        try:
+            img = image_msg_to_numpy(msg)
+        except Exception as exc:
+            self.get_logger().error(f"Image conversion failed: {exc}")
+            return
+
+        # 先运行颜色检测。run_yolo() 内部会发布 /seedling/orange_mask
+        detections = self.run_yolo(img)
+
+        t = stamp_to_sec(msg.header.stamp)
+        cloud_msg, cloud_dt = self.nearest_cloud(t)
+        odom_msg, odom_dt = self.nearest_odom(t)
+
+        if cloud_msg is None or odom_msg is None:
+            cloud_dt_s = "none" if cloud_dt is None else f"{cloud_dt*1000.0:.1f}ms"
+            odom_dt_s = "none" if odom_dt is None else f"{odom_dt*1000.0:.1f}ms"
+            self.get_logger().warn(
+                f"orange image ok, but waiting sync: "
+                f"cloud={'ok' if cloud_msg else 'missing'} dt={cloud_dt_s}, "
+                f"odom={'ok' if odom_msg else 'missing'} dt={odom_dt_s}, "
+                f"detections={len(detections)}",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        if not detections:
+            return
+
+        pts_cloud = self.pointcloud_to_xyz(cloud_msg)
+        if pts_cloud.shape[0] == 0:
+            self.get_logger().warn("cloud has zero valid points", throttle_duration_sec=2.0)
+            return
+
+        pts_lidar = self.cloud_points_to_lidar(pts_cloud)
+        uv, valid = self.project_lidar_points(pts_lidar)
+
+        points_map = []
+        for det in detections:
+            p_lidar = self.localize_sep_in_lidar(det, pts_lidar, uv, valid)
+            if p_lidar is None:
+                self.get_logger().warn(
+                    f"orange detected but no nearby projected cloud points: "
+                    f"u={det.u:.1f}, v={det.v:.1f}, search_radius_px={self.search_radius_px}",
+                    throttle_duration_sec=2.0,
+                )
+                continue
+
+            p_map = self.lidar_to_map(p_lidar, odom_msg)
+            if not np.isfinite(p_map).all():
+                continue
+
+            obs = PointStamped()
+            obs.header.stamp = msg.header.stamp
+            obs.header.frame_id = "map"
+            obs.point.x = float(p_map[0])
+            obs.point.y = float(p_map[1])
+            obs.point.z = float(p_map[2])
+            self.obs_pub.publish(obs)
+
+            self.obs_count += 1
+            points_map.append(p_map)
+
+        if points_map:
+            self.publish_observation_marker(points_map, msg.header.stamp)
+            self.get_logger().info(
+                f"orange frame={self.frame_count}, detections={len(detections)}, "
+                f"observations={len(points_map)}, "
+                f"dt_cloud={cloud_dt*1000.0:.1f}ms, dt_odom={odom_dt*1000.0:.1f}ms, "
+                f"total_obs={self.obs_count}",
+                throttle_duration_sec=1.0,
+            )
 
 
 def main(args=None) -> None:

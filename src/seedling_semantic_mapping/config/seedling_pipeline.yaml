@@ -2,7 +2,7 @@ yolo_sep_localizer:
   ros__parameters:
     # 外部同步方案：FAST-LIVO 尽量少改，只额外输出当前帧去畸变 body 点云。
     # YOLO 用彩色图，不再用 FAST-LIVO 内部灰度图。
-    image_topic: /left_camera/image_10hz
+    image_topic: /miivii_gmsl/image3
     cloud_topic: /fastlivo/deskew/cloud_body
     cloud_frame: body                 # body: 点云为 FAST-LIVO body/IMU 坐标；lidar: 点云已经是 LiDAR 坐标
     odom_topic: /aft_mapped_to_init
@@ -60,15 +60,15 @@ yolo_sep_localizer:
 
     # 橙色乒乓球测试参数。color_sep_localizer 使用这些参数，YOLO 节点会忽略。
     orange_h_low: 5
-    orange_h_high: 28
-    orange_s_low: 80
-    orange_v_low: 80
+    orange_h_high: 25
+    orange_s_low: 120
+    orange_v_low: 120
 
-    color_min_area: 80
-    color_max_area: 200000
-    color_min_fill_ratio: 0.20
+    color_min_area: 1500
+    color_max_area: 100000
+    color_min_fill_ratio: 0.70
     color_point_v_ratio: 0.88
-    color_morph_kernel: 5
+    color_morph_kernel: 9
     color_debug_log_every: 30
 
     publish_debug_mask: true
