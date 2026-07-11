@@ -63,6 +63,8 @@ class SeedlingMapper(Node):
         self.declare_parameter("save_every_update", True)
         self.declare_parameter("same_stamp_duplicate_policy", "skip")  # skip or allow
         self.declare_parameter("max_same_stamp_history", 20)
+        # 未确认候选点超过该时间未再次观测，就自动删除。
+        self.declare_parameter("tentative_timeout_sec", 3.0)
 
         self.observation_topic = self.get_parameter("observation_topic").value
         self.marker_topic = self.get_parameter("marker_topic").value
@@ -79,6 +81,9 @@ class SeedlingMapper(Node):
         self.save_every_update = bool(self.get_parameter("save_every_update").value)
         self.same_stamp_duplicate_policy = str(self.get_parameter("same_stamp_duplicate_policy").value)
         self.max_same_stamp_history = int(self.get_parameter("max_same_stamp_history").value)
+        self.tentative_timeout_sec = float(
+            self.get_parameter("tentative_timeout_sec").value
+        )
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -111,19 +116,59 @@ class SeedlingMapper(Node):
             old = self.stamp_history.pop(0)
             self.used_landmarks_by_stamp.pop(old, None)
 
-    def nearest_landmark(self, x: float, y: float, z: float, used_ids: Optional[Set[int]]) -> Tuple[Optional[Landmark], float, float]:
+    def prune_stale_tentative(self, now_sec: float) -> None:
+        if self.tentative_timeout_sec <= 0.0:
+            return
+
+        before = len(self.landmarks)
+        self.landmarks = [
+            lm
+            for lm in self.landmarks
+            if not (
+                lm.status == "tentative"
+                and (now_sec - lm.last_seen_sec) > self.tentative_timeout_sec
+            )
+        ]
+
+        removed = before - len(self.landmarks)
+        if removed > 0:
+            self.get_logger().info(
+                f"removed {removed} stale tentative landmarks"
+            )
+
+    def nearest_landmark(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        used_ids: Optional[Set[int]],
+    ) -> Tuple[Optional[Landmark], float, float]:
         best = None
         best_xy = float("inf")
         best_z = float("inf")
+        best_score = float("inf")
+
+        xy_scale = max(self.gate_xy, 1e-6)
+        z_scale = max(self.gate_z, 1e-6)
+
         for lm in self.landmarks:
             if used_ids and lm.id in used_ids:
                 continue
+
             dxy = math.hypot(x - lm.x, y - lm.y)
             dz = abs(z - lm.z)
-            if dxy < best_xy:
+
+            # 先执行完整三维门限，不能只按 XY 选最近点后再检查 Z。
+            if dxy > self.gate_xy or dz > self.gate_z:
+                continue
+
+            score = (dxy / xy_scale) ** 2 + (dz / z_scale) ** 2
+            if score < best_score:
                 best = lm
                 best_xy = dxy
                 best_z = dz
+                best_score = score
+
         return best, best_xy, best_z
 
     def create_landmark(self, x: float, y: float, z: float, t: float) -> Landmark:
@@ -183,6 +228,7 @@ class SeedlingMapper(Node):
         if not all(math.isfinite(v) for v in (x, y, z)):
             return
         t = stamp_to_sec(msg.header.stamp)
+        self.prune_stale_tentative(t)
         key = stamp_key(msg.header.stamp)
 
         if key not in self.used_landmarks_by_stamp:
@@ -209,11 +255,14 @@ class SeedlingMapper(Node):
             self.save_csv()
 
     def publish_map_timer_cb(self) -> None:
-        """周期发布当前内存中的苗点地图。"""
+        """周期清理候选点并发布当前地图。"""
+        now = self.get_clock().now()
+        self.prune_stale_tentative(now.nanoseconds * 1e-9)
+
         if not self.landmarks:
             return
 
-        stamp = self.get_clock().now().to_msg()
+        stamp = now.to_msg()
         self.publish_markers(stamp)
         self.publish_map_points(stamp)
 

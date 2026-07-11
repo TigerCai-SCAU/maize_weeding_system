@@ -22,6 +22,7 @@ from typing import List
 
 import numpy as np
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PointStamped
 
@@ -45,18 +46,61 @@ class ColorSepLocalizer(YoloSepLocalizer):
         self.declare_parameter("color_point_v_ratio", 0.88)
         self.declare_parameter("color_morph_kernel", 5)
         self.declare_parameter("color_debug_log_every", 30)
+        # 颜色检测在缩小图像上运行，检测坐标随后恢复到原始分辨率。
+        self.declare_parameter("color_process_scale", 0.5)
 
         self.declare_parameter("publish_debug_mask", True)
         self.declare_parameter("debug_mask_topic", "/seedling/orange_mask")
+
+        # 雷达投影调试图：
+        # 绿色 = 投影雷达点
+        # 红色 = 橙色检测点
+        # 蓝色 = 距检测点最近的雷达投影点
+        self.declare_parameter("publish_projection_debug", True)
+        self.declare_parameter(
+            "projection_debug_topic",
+            "/seedling/projection_debug",
+        )
+        self.declare_parameter("projection_debug_every", 3)
+        self.declare_parameter("projection_debug_max_points", 1500)
 
         self.publish_debug_mask = bool(self.get_parameter("publish_debug_mask").value)
         self.debug_mask_topic = str(self.get_parameter("debug_mask_topic").value)
 
         self.debug_mask_pub = None
         if self.publish_debug_mask:
-            self.debug_mask_pub = self.create_publisher(Image, self.debug_mask_topic, 5)
+            self.debug_mask_pub = self.create_publisher(
+                Image,
+                self.debug_mask_topic,
+                5,
+            )
 
-        self.get_logger().info("ColorSepLocalizer started: using orange ping-pong ball as fake SEP.")
+        self.publish_projection_debug_enabled = bool(
+            self.get_parameter("publish_projection_debug").value
+        )
+        self.projection_debug_topic = str(
+            self.get_parameter("projection_debug_topic").value
+        )
+        self.projection_debug_every = max(
+            1,
+            int(self.get_parameter("projection_debug_every").value),
+        )
+        self.projection_debug_max_points = max(
+            100,
+            int(self.get_parameter("projection_debug_max_points").value),
+        )
+
+        self.projection_debug_pub = None
+        if self.publish_projection_debug_enabled:
+            self.projection_debug_pub = self.create_publisher(
+                Image,
+                self.projection_debug_topic,
+                2,
+            )
+
+        self.get_logger().info(
+            "ColorSepLocalizer started: using orange ping-pong ball as fake SEP."
+        )
 
     def publish_mask(self, mask: np.ndarray) -> None:
         if self.debug_mask_pub is None:
@@ -72,6 +116,185 @@ class ColorSepLocalizer(YoloSepLocalizer):
         msg.step = int(mask.shape[1])
         msg.data = mask.astype(np.uint8).tobytes()
         self.debug_mask_pub.publish(msg)
+
+    def publish_projection_debug_image(
+        self,
+        img_rgb: np.ndarray,
+        detections: List[SepDetection],
+        uv: np.ndarray,
+        valid: np.ndarray,
+        source_msg: Image,
+    ) -> None:
+        """发布雷达投影点与橙色检测点的叠加图。"""
+        if self.projection_debug_pub is None:
+            return
+
+        if self.frame_count % self.projection_debug_every != 0:
+            return
+
+        try:
+            import cv2
+        except Exception as exc:
+            self.get_logger().error(
+                f"projection debug cv2 failed: {exc}"
+            )
+            return
+
+        overlay = np.ascontiguousarray(
+            img_rgb[:, :, :3].copy()
+        )
+        height, width = overlay.shape[:2]
+
+        finite = (
+            valid
+            & np.isfinite(uv).all(axis=1)
+        )
+
+        in_image = (
+            finite
+            & (uv[:, 0] >= 0.0)
+            & (uv[:, 0] < float(width))
+            & (uv[:, 1] >= 0.0)
+            & (uv[:, 1] < float(height))
+        )
+
+        projected_indices = np.flatnonzero(in_image)
+
+        if projected_indices.size > self.projection_debug_max_points:
+            step = int(
+                np.ceil(
+                    projected_indices.size
+                    / float(self.projection_debug_max_points)
+                )
+            )
+            projected_indices = projected_indices[::step]
+
+        # 绿色：雷达投影点
+        for index in projected_indices:
+            u, v = uv[index]
+            cv2.circle(
+                overlay,
+                (int(round(u)), int(round(v))),
+                2,
+                (0, 255, 0),
+                -1,
+            )
+
+        valid_indices = np.flatnonzero(finite)
+        log_parts = []
+
+        for det_index, det in enumerate(detections):
+            det_u = int(round(det.u))
+            det_v = int(round(det.v))
+
+            # 红色：检测到的球底部点
+            cv2.circle(
+                overlay,
+                (det_u, det_v),
+                12,
+                (255, 0, 0),
+                3,
+            )
+
+            # 黄色：检测框
+            if det.bbox is not None:
+                x1, y1, x2, y2 = det.bbox
+                cv2.rectangle(
+                    overlay,
+                    (int(round(x1)), int(round(y1))),
+                    (int(round(x2)), int(round(y2))),
+                    (255, 255, 0),
+                    3,
+                )
+
+            nearest_distance = float("inf")
+            candidate_count = 0
+
+            if valid_indices.size > 0:
+                valid_uv = uv[valid_indices]
+
+                du = valid_uv[:, 0] - det.u
+                dv = valid_uv[:, 1] - det.v
+                dist2 = du * du + dv * dv
+
+                nearest_local = int(np.argmin(dist2))
+                nearest_global = int(valid_indices[nearest_local])
+
+                nearest_distance = float(
+                    np.sqrt(dist2[nearest_local])
+                )
+
+                candidate_count = int(
+                    np.count_nonzero(
+                        dist2
+                        <= self.search_radius_px
+                        * self.search_radius_px
+                    )
+                )
+
+                nearest_u = int(
+                    round(uv[nearest_global, 0])
+                )
+                nearest_v = int(
+                    round(uv[nearest_global, 1])
+                )
+
+                # 蓝色：最近投影点
+                cv2.circle(
+                    overlay,
+                    (nearest_u, nearest_v),
+                    10,
+                    (0, 0, 255),
+                    3,
+                )
+
+                # 青色：检测点到最近雷达点的偏差
+                cv2.line(
+                    overlay,
+                    (det_u, det_v),
+                    (nearest_u, nearest_v),
+                    (0, 255, 255),
+                    2,
+                )
+
+            text = (
+                f"{det_index}: d={nearest_distance:.1f}px "
+                f"n={candidate_count}"
+            )
+
+            cv2.putText(
+                overlay,
+                text,
+                (det_u + 15, max(30, det_v - 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+            log_parts.append(
+                f"#{det_index} "
+                f"uv=({det.u:.1f},{det.v:.1f}) "
+                f"nearest={nearest_distance:.1f}px "
+                f"candidates={candidate_count}"
+            )
+
+        output = Image()
+        output.header = source_msg.header
+        output.height = int(height)
+        output.width = int(width)
+        output.encoding = "rgb8"
+        output.is_bigendian = 0
+        output.step = int(width * 3)
+        output.data = overlay.tobytes()
+
+        self.projection_debug_pub.publish(output)
+
+        self.get_logger().info(
+            "projection: " + " | ".join(log_parts),
+            throttle_duration_sec=1.0,
+        )
 
     def run_yolo(self, img_rgb: np.ndarray) -> List[SepDetection]:
         """
@@ -105,16 +328,59 @@ class ColorSepLocalizer(YoloSepLocalizer):
         min_fill = float(self.get_parameter("color_min_fill_ratio").value)
         v_ratio = float(self.get_parameter("color_point_v_ratio").value)
         kernel_size = int(self.get_parameter("color_morph_kernel").value)
-        debug_every = max(1, int(self.get_parameter("color_debug_log_every").value))
+        debug_every = max(
+            1,
+            int(self.get_parameter("color_debug_log_every").value),
+        )
 
-        hsv = cv2.cvtColor(img_rgb[:, :, :3], cv2.COLOR_RGB2HSV)
+        process_scale = float(
+            self.get_parameter("color_process_scale").value
+        )
+        process_scale = min(max(process_scale, 0.1), 1.0)
+
+        source_rgb = img_rgb[:, :, :3]
+
+        if process_scale < 0.999:
+            work_rgb = cv2.resize(
+                source_rgb,
+                None,
+                fx=process_scale,
+                fy=process_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            work_rgb = source_rgb
+
+        inverse_scale = 1.0 / process_scale
+        area_scale = process_scale * process_scale
+
+        min_area_work = max(
+            1,
+            int(round(min_area * area_scale)),
+        )
+        max_area_work = max(
+            min_area_work + 1,
+            int(round(max_area * area_scale)),
+        )
+
+        kernel_size_work = max(
+            1,
+            int(round(kernel_size * process_scale)),
+        )
+        if kernel_size_work > 1 and kernel_size_work % 2 == 0:
+            kernel_size_work += 1
+
+        hsv = cv2.cvtColor(work_rgb, cv2.COLOR_RGB2HSV)
 
         lower = np.array([h_low, s_low, v_low], dtype=np.uint8)
         upper = np.array([h_high, 255, 255], dtype=np.uint8)
         mask = cv2.inRange(hsv, lower, upper)
 
-        if kernel_size > 1:
-            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        if kernel_size_work > 1:
+            kernel = np.ones(
+                (kernel_size_work, kernel_size_work),
+                np.uint8,
+            )
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -131,7 +397,7 @@ class ColorSepLocalizer(YoloSepLocalizer):
             h = int(stats[label, cv2.CC_STAT_HEIGHT])
             area = int(stats[label, cv2.CC_STAT_AREA])
 
-            if area < min_area or area > max_area:
+            if area < min_area_work or area > max_area_work:
                 continue
 
             bbox_area = max(1, w * h)
@@ -143,16 +409,22 @@ class ColorSepLocalizer(YoloSepLocalizer):
             if not np.isfinite(cx) or not np.isfinite(cy):
                 continue
 
-            # 对放在地面的球，底部中心点比中心点更接近地面接触点。
-            u = float(cx)
-            v = float(y + v_ratio * h)
+            # 在缩小图上检测，但输出必须恢复到原始图像坐标。
+            # 对放在地面的球，底部中心点接近地面接触位置。
+            u = float(cx * inverse_scale)
+            v = float((y + v_ratio * h) * inverse_scale)
 
             detections.append(
                 SepDetection(
                     u=u,
                     v=v,
-                    conf=float(area),
-                    bbox=(float(x), float(y), float(x + w), float(y + h)),
+                    conf=float(area / area_scale),
+                    bbox=(
+                        float(x * inverse_scale),
+                        float(y * inverse_scale),
+                        float((x + w) * inverse_scale),
+                        float((y + h) * inverse_scale),
+                    ),
                 )
             )
 
@@ -216,6 +488,14 @@ class ColorSepLocalizer(YoloSepLocalizer):
         pts_lidar = self.cloud_points_to_lidar(pts_cloud)
         uv, valid = self.project_lidar_points(pts_lidar)
 
+        self.publish_projection_debug_image(
+            img,
+            detections,
+            uv,
+            valid,
+            msg,
+        )
+
         points_map = []
         for det in detections:
             p_lidar = self.localize_sep_in_lidar(det, pts_lidar, uv, valid)
@@ -256,9 +536,13 @@ class ColorSepLocalizer(YoloSepLocalizer):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = ColorSepLocalizer()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

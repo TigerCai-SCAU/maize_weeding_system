@@ -17,6 +17,7 @@ are handled by seedling_mapper.py.
 from __future__ import annotations
 
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, List, Optional, Sequence, Tuple
@@ -25,6 +26,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from builtin_interfaces.msg import Time
@@ -150,6 +152,15 @@ class YoloSepLocalizer(Node):
         self.declare_parameter("cam_fy", 1293.3155)
         self.declare_parameter("cam_cx", 626.91359)
         self.declare_parameter("cam_cy", 522.799224)
+
+        # ROS CameraInfo plumb_bob distortion:
+        # D = [k1, k2, p1, p2, k3]
+        self.declare_parameter("use_distortion", True)
+        self.declare_parameter("dist_k1", -0.554065)
+        self.declare_parameter("dist_k2", 0.220066)
+        self.declare_parameter("dist_p1", 0.001350)
+        self.declare_parameter("dist_p2", 0.001332)
+        self.declare_parameter("dist_k3", 0.0)
         self.declare_parameter("intrinsic_scale", 1.0)
 
         # FAST-Calib extrinsic: P_cam = Rcl * P_lidar + Pcl
@@ -175,6 +186,8 @@ class YoloSepLocalizer(Node):
         self.declare_parameter("max_depth", 8.0)
         self.declare_parameter("use_plane_intersection", True)
         self.declare_parameter("max_plane_rmse", 0.05)
+        # 只使用离检测像素最近的一部分投影点，避免混入其他表面。
+        self.declare_parameter("max_candidate_points", 40)
 
         self.image_topic = self.get_parameter("image_topic").value
         self.cloud_topic = self.get_parameter("cloud_topic").value
@@ -198,6 +211,15 @@ class YoloSepLocalizer(Node):
         self.cx = float(self.get_parameter("cam_cx").value) * scale
         self.cy = float(self.get_parameter("cam_cy").value) * scale
 
+        self.use_distortion = bool(
+            self.get_parameter("use_distortion").value
+        )
+        self.dist_k1 = float(self.get_parameter("dist_k1").value)
+        self.dist_k2 = float(self.get_parameter("dist_k2").value)
+        self.dist_p1 = float(self.get_parameter("dist_p1").value)
+        self.dist_p2 = float(self.get_parameter("dist_p2").value)
+        self.dist_k3 = float(self.get_parameter("dist_k3").value)
+
         self.Rcl = np.array(self.get_parameter("Rcl").value, dtype=np.float64).reshape(3, 3)
         self.Pcl = np.array(self.get_parameter("Pcl").value, dtype=np.float64).reshape(3)
         self.cloud_frame = str(self.get_parameter("cloud_frame").value).lower().strip()
@@ -214,6 +236,10 @@ class YoloSepLocalizer(Node):
         self.max_depth = float(self.get_parameter("max_depth").value)
         self.use_plane_intersection = bool(self.get_parameter("use_plane_intersection").value)
         self.max_plane_rmse = float(self.get_parameter("max_plane_rmse").value)
+        self.max_candidate_points = max(
+            self.min_candidate_points,
+            int(self.get_parameter("max_candidate_points").value),
+        )
 
         self.det_conf = float(self.get_parameter("det_conf").value)
         self.kp_conf = float(self.get_parameter("kp_conf").value)
@@ -224,6 +250,12 @@ class YoloSepLocalizer(Node):
 
         self.cloud_cache: Deque[CloudCacheItem] = deque(maxlen=self.cache_size)
         self.odom_cache: Deque[OdomCacheItem] = deque(maxlen=self.cache_size)
+
+        # 图像处理较重，必须允许点云和里程计回调并行更新缓存。
+        self.cache_lock = threading.Lock()
+        self.image_cb_group = MutuallyExclusiveCallbackGroup()
+        self.cloud_cb_group = MutuallyExclusiveCallbackGroup()
+        self.odom_cb_group = MutuallyExclusiveCallbackGroup()
 
         self.model = None
         model_path = str(self.get_parameter("model_path").value)
@@ -254,9 +286,27 @@ class YoloSepLocalizer(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
 
-        self.cloud_sub = self.create_subscription(PointCloud2, self.cloud_topic, self.cloud_cb, qos_sensor)
-        self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.odom_cb, qos_pub)
-        self.image_sub = self.create_subscription(Image, self.image_topic, self.image_cb, qos_sensor)
+        self.cloud_sub = self.create_subscription(
+            PointCloud2,
+            self.cloud_topic,
+            self.cloud_cb,
+            qos_sensor,
+            callback_group=self.cloud_cb_group,
+        )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            self.odom_topic,
+            self.odom_cb,
+            qos_pub,
+            callback_group=self.odom_cb_group,
+        )
+        self.image_sub = self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_cb,
+            qos_sensor,
+            callback_group=self.image_cb_group,
+        )
 
         self.obs_pub = self.create_publisher(PointStamped, self.observation_topic, qos_pub)
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, qos_pub)
@@ -269,22 +319,34 @@ class YoloSepLocalizer(Node):
         )
 
     def cloud_cb(self, msg: PointCloud2) -> None:
-        self.cloud_cache.append(CloudCacheItem(stamp_to_sec(msg.header.stamp), msg))
+        item = CloudCacheItem(stamp_to_sec(msg.header.stamp), msg)
+        with self.cache_lock:
+            self.cloud_cache.append(item)
 
     def odom_cb(self, msg: Odometry) -> None:
-        self.odom_cache.append(OdomCacheItem(stamp_to_sec(msg.header.stamp), msg))
+        item = OdomCacheItem(stamp_to_sec(msg.header.stamp), msg)
+        with self.cache_lock:
+            self.odom_cache.append(item)
 
     def nearest_cloud(self, t: float) -> Tuple[Optional[PointCloud2], Optional[float]]:
-        if not self.cloud_cache:
+        with self.cache_lock:
+            cache = list(self.cloud_cache)
+
+        if not cache:
             return None, None
-        item = min(self.cloud_cache, key=lambda c: abs(c.stamp_sec - t))
+
+        item = min(cache, key=lambda c: abs(c.stamp_sec - t))
         dt = abs(item.stamp_sec - t)
         return (item.msg, dt) if dt <= self.max_image_cloud_dt else (None, dt)
 
     def nearest_odom(self, t: float) -> Tuple[Optional[Odometry], Optional[float]]:
-        if not self.odom_cache:
+        with self.cache_lock:
+            cache = list(self.odom_cache)
+
+        if not cache:
             return None, None
-        item = min(self.odom_cache, key=lambda o: abs(o.stamp_sec - t))
+
+        item = min(cache, key=lambda o: abs(o.stamp_sec - t))
         dt = abs(item.stamp_sec - t)
         return (item.msg, dt) if dt <= self.max_image_odom_dt else (None, dt)
 
@@ -389,23 +451,133 @@ class YoloSepLocalizer(Node):
         # P_lidar = extR^T * (P_body - extT)
         return (self.extR.T @ (pts_cloud - self.extT.reshape(1, 3)).T).T
 
-    def project_lidar_points(self, pts_lidar: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def project_lidar_points(
+        self,
+        pts_lidar: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Project LiDAR points onto the raw distorted camera image."""
         # P_cam = Rcl * P_lidar + Pcl
-        pts_cam = (self.Rcl @ pts_lidar.T).T + self.Pcl.reshape(1, 3)
+        pts_cam = (
+            self.Rcl @ pts_lidar.T
+        ).T + self.Pcl.reshape(1, 3)
+
         z = pts_cam[:, 2]
-        valid = (z > self.min_depth) & (z < self.max_depth)
-        u = self.fx * pts_cam[:, 0] / z + self.cx
-        v = self.fy * pts_cam[:, 1] / z + self.cy
+        valid = (
+            np.isfinite(pts_cam).all(axis=1)
+            & (z > self.min_depth)
+            & (z < self.max_depth)
+        )
+
+        safe_z = np.where(np.abs(z) > 1e-9, z, 1.0)
+        x = pts_cam[:, 0] / safe_z
+        y = pts_cam[:, 1] / safe_z
+
+        if self.use_distortion:
+            x2 = x * x
+            y2 = y * y
+            xy = x * y
+            r2 = x2 + y2
+            r4 = r2 * r2
+            r6 = r4 * r2
+
+            radial = (
+                1.0
+                + self.dist_k1 * r2
+                + self.dist_k2 * r4
+                + self.dist_k3 * r6
+            )
+
+            x_distorted = (
+                x * radial
+                + 2.0 * self.dist_p1 * xy
+                + self.dist_p2 * (r2 + 2.0 * x2)
+            )
+
+            y_distorted = (
+                y * radial
+                + self.dist_p1 * (r2 + 2.0 * y2)
+                + 2.0 * self.dist_p2 * xy
+            )
+        else:
+            x_distorted = x
+            y_distorted = y
+
+        u = self.fx * x_distorted + self.cx
+        v = self.fy * y_distorted + self.cy
+
         uv = np.column_stack((u, v))
+        valid &= np.isfinite(uv).all(axis=1)
         return uv, valid
+
+    def pixel_to_camera_ray(
+        self,
+        u: float,
+        v: float,
+    ) -> np.ndarray:
+        """Convert a distorted image pixel to an undistorted camera ray."""
+        xd = (float(u) - self.cx) / self.fx
+        yd = (float(v) - self.cy) / self.fy
+
+        if not self.use_distortion:
+            ray = np.array([xd, yd, 1.0], dtype=np.float64)
+            return ray / np.linalg.norm(ray)
+
+        # Fixed-point inverse of the plumb_bob distortion model.
+        x = xd
+        y = yd
+
+        for _ in range(10):
+            x2 = x * x
+            y2 = y * y
+            xy = x * y
+            r2 = x2 + y2
+            r4 = r2 * r2
+            r6 = r4 * r2
+
+            radial = (
+                1.0
+                + self.dist_k1 * r2
+                + self.dist_k2 * r4
+                + self.dist_k3 * r6
+            )
+
+            if abs(radial) < 1e-9:
+                break
+
+            delta_x = (
+                2.0 * self.dist_p1 * xy
+                + self.dist_p2 * (r2 + 2.0 * x2)
+            )
+
+            delta_y = (
+                self.dist_p1 * (r2 + 2.0 * y2)
+                + 2.0 * self.dist_p2 * xy
+            )
+
+            x = (xd - delta_x) / radial
+            y = (yd - delta_y) / radial
+
+        ray = np.array([x, y, 1.0], dtype=np.float64)
+        return ray / np.linalg.norm(ray)
 
     def localize_sep_in_lidar(self, det: SepDetection, pts_lidar: np.ndarray, uv: np.ndarray, valid: np.ndarray) -> Optional[np.ndarray]:
         du = uv[:, 0] - det.u
         dv = uv[:, 1] - det.v
-        mask = valid & ((du * du + dv * dv) <= self.search_radius_px * self.search_radius_px)
-        candidates = pts_lidar[mask]
-        if candidates.shape[0] < self.min_candidate_points:
+        dist2 = du * du + dv * dv
+
+        candidate_indices = np.flatnonzero(
+            valid & (dist2 <= self.search_radius_px * self.search_radius_px)
+        )
+        if candidate_indices.size < self.min_candidate_points:
             return None
+
+        # 搜索圆内可能同时包含球、地面和背景。
+        # 只保留像素距离检测点最近的若干投影点，防止三维结果在不同表面间跳变。
+        if candidate_indices.size > self.max_candidate_points:
+            order = np.argsort(dist2[candidate_indices])
+            candidate_indices = candidate_indices[order[:self.max_candidate_points]]
+
+        candidates = pts_lidar[candidate_indices]
 
         if not self.use_plane_intersection:
             return np.median(candidates, axis=0)
@@ -429,8 +601,7 @@ class YoloSepLocalizer(Node):
             return np.median(candidates, axis=0)
 
         # Camera ray in lidar frame.
-        ray_cam = np.array([(det.u - self.cx) / self.fx, (det.v - self.cy) / self.fy, 1.0], dtype=np.float64)
-        ray_cam = ray_cam / np.linalg.norm(ray_cam)
+        ray_cam = self.pixel_to_camera_ray(det.u, det.v)
         cam_center_lidar = -self.Rcl.T @ self.Pcl
         ray_lidar = self.Rcl.T @ ray_cam
         ray_lidar = ray_lidar / np.linalg.norm(ray_lidar)

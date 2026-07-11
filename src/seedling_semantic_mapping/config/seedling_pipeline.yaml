@@ -33,6 +33,15 @@ yolo_sep_localizer:
     cam_fy: 2069.439913
     cam_cx: 1439.099334
     cam_cy: 902.294703
+
+    # /miivii_gmsl/image3 是原始畸变图像。
+    # ROS CameraInfo distortion_model = plumb_bob
+    use_distortion: true
+    dist_k1: -0.554065
+    dist_k2: 0.220066
+    dist_p1: 0.001350
+    dist_p2: 0.001332
+    dist_k3: 0.0
     intrinsic_scale: 1.0
 
     # FAST-Calib LiDAR -> Camera extrinsic:
@@ -50,8 +59,9 @@ yolo_sep_localizer:
     extT: [-0.011, -0.02329, 0.04412]
 
     # Pixel neighborhood around SEP used to pick projected LiDAR points.
-    search_radius_px: 100.0
-    min_candidate_points: 1
+    search_radius_px: 80.0
+    min_candidate_points: 3
+    max_candidate_points: 30
     cloud_stride: 1
     min_depth: 0.05
     max_depth: 8.0
@@ -69,10 +79,16 @@ yolo_sep_localizer:
     color_min_fill_ratio: 0.70
     color_point_v_ratio: 0.88
     color_morph_kernel: 9
+    color_process_scale: 0.5
     color_debug_log_every: 30
 
-    publish_debug_mask: true
+    publish_debug_mask: false
     debug_mask_topic: /seedling/orange_mask
+
+    publish_projection_debug: false
+    projection_debug_topic: /seedling/projection_debug
+    projection_debug_every: 5
+    projection_debug_max_points: 500
 
 seedling_mapper:
   ros__parameters:
@@ -84,11 +100,12 @@ seedling_mapper:
     # Data association. 先放宽，跑通后再收紧。
     gate_xy: 0.12
     gate_z: 0.25
-    confirm_hits: 2
+    confirm_hits: 4
     min_update_dt: 0.20
-    position_alpha: 0.25
-    publish_all_landmarks: true
+    position_alpha: 0.15
+    publish_all_landmarks: false
     map_points_confirmed_only: true   # /seedling/map_points 只发布 confirmed 苗点，给路径规划用
     save_every_update: true
     same_stamp_duplicate_policy: skip
     max_same_stamp_history: 20
+    tentative_timeout_sec: 3.0
