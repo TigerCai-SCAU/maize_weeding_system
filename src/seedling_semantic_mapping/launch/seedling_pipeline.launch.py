@@ -18,12 +18,26 @@ def generate_launch_description():
         description='Full path to seedling pipeline yaml config.'
     )
     config_file = LaunchConfiguration('config_file')
+    localizer_arg = DeclareLaunchArgument(
+        'localizer_executable',
+        default_value='yolo_sep_localizer',
+        description='Use yolo_sep_localizer or color_sep_localizer.'
+    )
+    localizer_executable = LaunchConfiguration('localizer_executable')
 
     return LaunchDescription([
         config_arg,
+        localizer_arg,
         Node(
             package='seedling_semantic_mapping',
-            executable='yolo_sep_localizer',
+            executable='odom_tf_broadcaster',
+            name='odom_tf_broadcaster',
+            parameters=[config_file],
+            output='screen',
+        ),
+        Node(
+            package='seedling_semantic_mapping',
+            executable=localizer_executable,
             name='yolo_sep_localizer',
             parameters=[config_file],
             output='screen',

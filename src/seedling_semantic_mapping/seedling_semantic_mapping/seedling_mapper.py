@@ -52,6 +52,7 @@ class SeedlingMapper(Node):
         self.declare_parameter("marker_topic", "/seedling/map_markers")
         self.declare_parameter("map_points_topic", "/seedling/map_points")
         self.declare_parameter("csv_path", "/tmp/seedling_map_confirmed.csv")
+        self.declare_parameter("world_frame", "camera_init")
 
         self.declare_parameter("gate_xy", 0.10)
         self.declare_parameter("gate_z", 0.20)
@@ -70,6 +71,7 @@ class SeedlingMapper(Node):
         self.marker_topic = self.get_parameter("marker_topic").value
         self.map_points_topic = self.get_parameter("map_points_topic").value
         self.csv_path = Path(str(self.get_parameter("csv_path").value))
+        self.world_frame = str(self.get_parameter("world_frame").value).strip()
 
         self.gate_xy = float(self.get_parameter("gate_xy").value)
         self.gate_z = float(self.get_parameter("gate_z").value)
@@ -221,8 +223,13 @@ class SeedlingMapper(Node):
             lm.status = "confirmed"
 
     def obs_cb(self, msg: PointStamped) -> None:
-        if msg.header.frame_id and msg.header.frame_id != "map":
-            self.get_logger().warn(f"Observation frame_id is '{msg.header.frame_id}', expected 'map'.", throttle_duration_sec=2.0)
+        if msg.header.frame_id and msg.header.frame_id != self.world_frame:
+            self.get_logger().error(
+                f"Observation frame_id is '{msg.header.frame_id}', expected "
+                f"'{self.world_frame}'. Observation ignored.",
+                throttle_duration_sec=2.0,
+            )
+            return
 
         x, y, z = float(msg.point.x), float(msg.point.y), float(msg.point.z)
         if not all(math.isfinite(v) for v in (x, y, z)):
@@ -255,9 +262,8 @@ class SeedlingMapper(Node):
             self.save_csv()
 
     def publish_map_timer_cb(self) -> None:
-        """周期清理候选点并发布当前地图。"""
+        """周期发布当前地图。候选点只按传感器时间清理。"""
         now = self.get_clock().now()
-        self.prune_stale_tentative(now.nanoseconds * 1e-9)
 
         if not self.landmarks:
             return
@@ -278,7 +284,7 @@ class SeedlingMapper(Node):
                 continue
 
             m = Marker()
-            m.header.frame_id = "map"
+            m.header.frame_id = self.world_frame
             m.header.stamp = stamp
             m.ns = "seedling_landmarks"
             m.id = marker_id
@@ -305,7 +311,7 @@ class SeedlingMapper(Node):
             ma.markers.append(m)
 
             text = Marker()
-            text.header.frame_id = "map"
+            text.header.frame_id = self.world_frame
             text.header.stamp = stamp
             text.ns = "seedling_landmark_ids"
             text.id = marker_id
@@ -337,7 +343,7 @@ class SeedlingMapper(Node):
         important part.
         """
         pa = PoseArray()
-        pa.header.frame_id = "map"
+        pa.header.frame_id = self.world_frame
         pa.header.stamp = stamp
 
         # Keep output order stable by landmark id.

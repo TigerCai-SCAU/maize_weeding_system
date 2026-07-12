@@ -27,6 +27,7 @@ setup(
             'yolo_sep_localizer = seedling_semantic_mapping.yolo_sep_localizer:main',
             'color_sep_localizer = seedling_semantic_mapping.color_sep_localizer:main',
             'seedling_mapper = seedling_semantic_mapping.seedling_mapper:main',
+            'odom_tf_broadcaster = seedling_semantic_mapping.odom_tf_broadcaster:main',
         ],
     },
 )

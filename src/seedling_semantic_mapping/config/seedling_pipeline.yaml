@@ -6,6 +6,7 @@ yolo_sep_localizer:
     cloud_topic: /fastlivo/deskew/cloud_body
     cloud_frame: body                 # body: 点云为 FAST-LIVO body/IMU 坐标；lidar: 点云已经是 LiDAR 坐标
     odom_topic: /aft_mapped_to_init
+    world_frame: camera_init
     observation_topic: /seedling/observation_point_map
     marker_topic: /seedling/current_observation_markers
 
@@ -21,10 +22,11 @@ yolo_sep_localizer:
     nms_sep_px: 12.0
 
     # 图像作为触发源，找最近的去畸变点云和里程计。
-    # 田间绕苗建议从 50~80 ms 开始，后面能同步好再收紧。
-    max_image_cloud_dt: 0.30
-    max_image_odom_dt: 0.30
-    max_sync_dt: 0.30       # 兼容旧参数，可不管
+    # 图像只负责选择点云；点云时间再选择里程计。
+    max_image_cloud_dt: 0.12
+    max_cloud_odom_dt: 0.06
+    max_image_odom_dt: 0.08  # 旧参数，仅为兼容保留
+    max_sync_dt: 0.08        # 兼容旧参数
     cache_size: 50
 
     # Camera intrinsics. 如果 image_topic 是 1280x1024 彩图，intrinsic_scale=1.0。
@@ -59,8 +61,8 @@ yolo_sep_localizer:
     extT: [-0.011, -0.02329, 0.04412]
 
     # Pixel neighborhood around SEP used to pick projected LiDAR points.
-    search_radius_px: 80.0
-    min_candidate_points: 3
+    search_radius_px: 100.0
+    min_candidate_points: 2
     max_candidate_points: 30
     cloud_stride: 1
     min_depth: 0.05
@@ -82,13 +84,13 @@ yolo_sep_localizer:
     color_process_scale: 0.5
     color_debug_log_every: 30
 
-    publish_debug_mask: false
+    publish_debug_mask: true
     debug_mask_topic: /seedling/orange_mask
 
-    publish_projection_debug: false
+    publish_projection_debug: true
     projection_debug_topic: /seedling/projection_debug
-    projection_debug_every: 5
-    projection_debug_max_points: 500
+    projection_debug_every: 3
+    projection_debug_max_points: 1500
 
 seedling_mapper:
   ros__parameters:
@@ -96,16 +98,23 @@ seedling_mapper:
     marker_topic: /seedling/map_markers
     map_points_topic: /seedling/map_points
     csv_path: /tmp/seedling_map_confirmed.csv
+    world_frame: camera_init
 
     # Data association. 先放宽，跑通后再收紧。
     gate_xy: 0.12
     gate_z: 0.25
-    confirm_hits: 4
+    confirm_hits: 2
     min_update_dt: 0.20
     position_alpha: 0.15
     publish_all_landmarks: false
     map_points_confirmed_only: true   # /seedling/map_points 只发布 confirmed 苗点，给路径规划用
     save_every_update: true
-    same_stamp_duplicate_policy: skip
+    same_stamp_duplicate_policy: allow
     max_same_stamp_history: 20
-    tentative_timeout_sec: 3.0
+    tentative_timeout_sec: 10.0
+
+odom_tf_broadcaster:
+  ros__parameters:
+    odom_topic: /aft_mapped_to_init
+    parent_frame: camera_init
+    child_frame: body

@@ -27,6 +27,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from builtin_interfaces.msg import Time
@@ -127,6 +128,9 @@ class YoloSepLocalizer(Node):
         self.declare_parameter("odom_topic", "/aft_mapped_to_init")
         self.declare_parameter("observation_topic", "/seedling/observation_point_map")
         self.declare_parameter("marker_topic", "/seedling/current_observation_markers")
+        # The pose in /aft_mapped_to_init is expressed in camera_init.
+        # Keep this honest until a RTK/GTSAM map->camera_init transform is applied.
+        self.declare_parameter("world_frame", "camera_init")
 
         # YOLO / SEP detection
         self.declare_parameter("model_path", "")
@@ -139,8 +143,10 @@ class YoloSepLocalizer(Node):
         self.declare_parameter("max_detections", 50)
         self.declare_parameter("nms_sep_px", 12.0)
 
-        # Synchronization. The image is the trigger; the node finds nearest cloud and odom by header.stamp.
+        # Synchronization. Image selects the nearest cloud; cloud time selects odom.
         self.declare_parameter("max_image_cloud_dt", 0.08)
+        self.declare_parameter("max_cloud_odom_dt", 0.03)
+        # Deprecated compatibility key. It is no longer used for lookup.
         self.declare_parameter("max_image_odom_dt", 0.08)
         # Backward compatibility with the older config key.
         self.declare_parameter("max_sync_dt", 0.08)
@@ -194,15 +200,16 @@ class YoloSepLocalizer(Node):
         self.odom_topic = self.get_parameter("odom_topic").value
         self.observation_topic = self.get_parameter("observation_topic").value
         self.marker_topic = self.get_parameter("marker_topic").value
+        self.world_frame = str(self.get_parameter("world_frame").value).strip()
 
         legacy_max_sync_dt = float(self.get_parameter("max_sync_dt").value)
         self.max_image_cloud_dt = float(self.get_parameter("max_image_cloud_dt").value)
-        self.max_image_odom_dt = float(self.get_parameter("max_image_odom_dt").value)
+        self.max_cloud_odom_dt = float(self.get_parameter("max_cloud_odom_dt").value)
         # If the new keys are accidentally set to non-positive values, fall back to max_sync_dt.
         if self.max_image_cloud_dt <= 0.0:
             self.max_image_cloud_dt = legacy_max_sync_dt
-        if self.max_image_odom_dt <= 0.0:
-            self.max_image_odom_dt = legacy_max_sync_dt
+        if self.max_cloud_odom_dt <= 0.0:
+            self.max_cloud_odom_dt = legacy_max_sync_dt
         self.cache_size = int(self.get_parameter("cache_size").value)
 
         scale = float(self.get_parameter("intrinsic_scale").value)
@@ -348,7 +355,7 @@ class YoloSepLocalizer(Node):
 
         item = min(cache, key=lambda o: abs(o.stamp_sec - t))
         dt = abs(item.stamp_sec - t)
-        return (item.msg, dt) if dt <= self.max_image_odom_dt else (None, dt)
+        return (item.msg, dt) if dt <= self.max_cloud_odom_dt else (None, dt)
 
     def run_yolo(self, img_rgb: np.ndarray) -> List[SepDetection]:
         if self.model is None:
@@ -618,13 +625,13 @@ class YoloSepLocalizer(Node):
             return np.median(candidates, axis=0)
         return p
 
-    def lidar_to_map(self, p_lidar: np.ndarray, odom_msg: Odometry) -> np.ndarray:
+    def lidar_to_world(self, p_lidar: np.ndarray, odom_msg: Odometry) -> np.ndarray:
         p_body = self.extR @ p_lidar + self.extT
         pos = odom_msg.pose.pose.position
         ori = odom_msg.pose.pose.orientation
-        R_map_body = quat_to_rot_xyzw(ori.x, ori.y, ori.z, ori.w)
-        t_map_body = np.array([pos.x, pos.y, pos.z], dtype=np.float64)
-        return R_map_body @ p_body + t_map_body
+        R_world_body = quat_to_rot_xyzw(ori.x, ori.y, ori.z, ori.w)
+        t_world_body = np.array([pos.x, pos.y, pos.z], dtype=np.float64)
+        return R_world_body @ p_body + t_world_body
 
     def publish_observation_marker(self, points_map: Sequence[np.ndarray], stamp: Time) -> None:
         ma = MarkerArray()
@@ -634,7 +641,7 @@ class YoloSepLocalizer(Node):
 
         for i, p in enumerate(points_map):
             m = Marker()
-            m.header.frame_id = "map"
+            m.header.frame_id = self.world_frame
             m.header.stamp = stamp
             m.ns = "current_seedling_observations"
             m.id = i
@@ -656,15 +663,39 @@ class YoloSepLocalizer(Node):
 
     def image_cb(self, msg: Image) -> None:
         self.frame_count += 1
-        t = stamp_to_sec(msg.header.stamp)
-        cloud_msg, cloud_dt = self.nearest_cloud(t)
-        odom_msg, odom_dt = self.nearest_odom(t)
-        if cloud_msg is None or odom_msg is None:
-            cloud_dt_s = "none" if cloud_dt is None else f"{cloud_dt*1000.0:.1f}ms"
-            odom_dt_s = "none" if odom_dt is None else f"{odom_dt*1000.0:.1f}ms"
+        image_time = stamp_to_sec(msg.header.stamp)
+        cloud_msg, image_cloud_dt = self.nearest_cloud(image_time)
+        if cloud_msg is None:
+            cloud_dt_s = (
+                "none"
+                if image_cloud_dt is None
+                else f"{image_cloud_dt*1000.0:.1f}ms"
+            )
             self.get_logger().warn(
-                f"Waiting sync data: cloud={'ok' if cloud_msg else 'missing'} dt={cloud_dt_s}, "
-                f"odom={'ok' if odom_msg else 'missing'} dt={odom_dt_s}",
+                f"Waiting cloud near image: dt={cloud_dt_s}",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        cloud_time = stamp_to_sec(cloud_msg.header.stamp)
+        odom_msg, cloud_odom_dt = self.nearest_odom(cloud_time)
+        if odom_msg is None:
+            odom_dt_s = (
+                "none"
+                if cloud_odom_dt is None
+                else f"{cloud_odom_dt*1000.0:.1f}ms"
+            )
+            self.get_logger().warn(
+                f"Waiting odom near cloud: dt={odom_dt_s}",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        odom_frame = odom_msg.header.frame_id or self.world_frame
+        if odom_frame != self.world_frame:
+            self.get_logger().error(
+                f"odom frame is '{odom_frame}', configured world_frame is "
+                f"'{self.world_frame}'. A frame transform is required.",
                 throttle_duration_sec=2.0,
             )
             return
@@ -685,30 +716,33 @@ class YoloSepLocalizer(Node):
         pts_lidar = self.cloud_points_to_lidar(pts_cloud)
         uv, valid = self.project_lidar_points(pts_lidar)
 
-        points_map: List[np.ndarray] = []
+        points_world: List[np.ndarray] = []
         for det in detections:
             p_lidar = self.localize_sep_in_lidar(det, pts_lidar, uv, valid)
             if p_lidar is None:
                 continue
-            p_map = self.lidar_to_map(p_lidar, odom_msg)
-            if not np.isfinite(p_map).all():
+            p_world = self.lidar_to_world(p_lidar, odom_msg)
+            if not np.isfinite(p_world).all():
                 continue
 
             obs = PointStamped()
-            obs.header.stamp = msg.header.stamp
-            obs.header.frame_id = "map"
-            obs.point.x = float(p_map[0])
-            obs.point.y = float(p_map[1])
-            obs.point.z = float(p_map[2])
+            obs.header.stamp = cloud_msg.header.stamp
+            obs.header.frame_id = self.world_frame
+            obs.point.x = float(p_world[0])
+            obs.point.y = float(p_world[1])
+            obs.point.z = float(p_world[2])
             self.obs_pub.publish(obs)
             self.obs_count += 1
-            points_map.append(p_map)
+            points_world.append(p_world)
 
-        if points_map:
-            self.publish_observation_marker(points_map, msg.header.stamp)
+        if points_world:
+            self.publish_observation_marker(points_world, cloud_msg.header.stamp)
             self.get_logger().info(
-                f"frame={self.frame_count}, detections={len(detections)}, observations={len(points_map)}, "
-                f"dt_cloud={cloud_dt*1000.0:.1f}ms, dt_odom={odom_dt*1000.0:.1f}ms, total_obs={self.obs_count}",
+                f"frame={self.frame_count}, detections={len(detections)}, "
+                f"observations={len(points_world)}, "
+                f"dt_image_cloud={image_cloud_dt*1000.0:.1f}ms, "
+                f"dt_cloud_odom={cloud_odom_dt*1000.0:.1f}ms, "
+                f"total_obs={self.obs_count}",
                 throttle_duration_sec=1.0,
             )
 
@@ -716,12 +750,16 @@ class YoloSepLocalizer(Node):
 def main() -> None:
     rclpy.init()
     node = YoloSepLocalizer()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

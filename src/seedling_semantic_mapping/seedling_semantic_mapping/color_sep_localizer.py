@@ -461,18 +461,42 @@ class ColorSepLocalizer(YoloSepLocalizer):
         # 先运行颜色检测。run_yolo() 内部会发布 /seedling/orange_mask
         detections = self.run_yolo(img)
 
-        t = stamp_to_sec(msg.header.stamp)
-        cloud_msg, cloud_dt = self.nearest_cloud(t)
-        odom_msg, odom_dt = self.nearest_odom(t)
-
-        if cloud_msg is None or odom_msg is None:
-            cloud_dt_s = "none" if cloud_dt is None else f"{cloud_dt*1000.0:.1f}ms"
-            odom_dt_s = "none" if odom_dt is None else f"{odom_dt*1000.0:.1f}ms"
+        image_time = stamp_to_sec(msg.header.stamp)
+        cloud_msg, image_cloud_dt = self.nearest_cloud(image_time)
+        if cloud_msg is None:
+            cloud_dt_s = (
+                "none"
+                if image_cloud_dt is None
+                else f"{image_cloud_dt*1000.0:.1f}ms"
+            )
             self.get_logger().warn(
                 f"orange image ok, but waiting sync: "
-                f"cloud={'ok' if cloud_msg else 'missing'} dt={cloud_dt_s}, "
-                f"odom={'ok' if odom_msg else 'missing'} dt={odom_dt_s}, "
+                f"cloud=missing dt={cloud_dt_s}, "
                 f"detections={len(detections)}",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        cloud_time = stamp_to_sec(cloud_msg.header.stamp)
+        odom_msg, cloud_odom_dt = self.nearest_odom(cloud_time)
+        if odom_msg is None:
+            odom_dt_s = (
+                "none"
+                if cloud_odom_dt is None
+                else f"{cloud_odom_dt*1000.0:.1f}ms"
+            )
+            self.get_logger().warn(
+                f"orange image/cloud ok, but odom is missing: "
+                f"dt={odom_dt_s}, detections={len(detections)}",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        odom_frame = odom_msg.header.frame_id or self.world_frame
+        if odom_frame != self.world_frame:
+            self.get_logger().error(
+                f"odom frame is '{odom_frame}', configured world_frame is "
+                f"'{self.world_frame}'. A frame transform is required.",
                 throttle_duration_sec=2.0,
             )
             return
@@ -496,7 +520,7 @@ class ColorSepLocalizer(YoloSepLocalizer):
             msg,
         )
 
-        points_map = []
+        points_world = []
         for det in detections:
             p_lidar = self.localize_sep_in_lidar(det, pts_lidar, uv, valid)
             if p_lidar is None:
@@ -507,27 +531,28 @@ class ColorSepLocalizer(YoloSepLocalizer):
                 )
                 continue
 
-            p_map = self.lidar_to_map(p_lidar, odom_msg)
-            if not np.isfinite(p_map).all():
+            p_world = self.lidar_to_world(p_lidar, odom_msg)
+            if not np.isfinite(p_world).all():
                 continue
 
             obs = PointStamped()
-            obs.header.stamp = msg.header.stamp
-            obs.header.frame_id = "map"
-            obs.point.x = float(p_map[0])
-            obs.point.y = float(p_map[1])
-            obs.point.z = float(p_map[2])
+            obs.header.stamp = cloud_msg.header.stamp
+            obs.header.frame_id = self.world_frame
+            obs.point.x = float(p_world[0])
+            obs.point.y = float(p_world[1])
+            obs.point.z = float(p_world[2])
             self.obs_pub.publish(obs)
 
             self.obs_count += 1
-            points_map.append(p_map)
+            points_world.append(p_world)
 
-        if points_map:
-            self.publish_observation_marker(points_map, msg.header.stamp)
+        if points_world:
+            self.publish_observation_marker(points_world, cloud_msg.header.stamp)
             self.get_logger().info(
                 f"orange frame={self.frame_count}, detections={len(detections)}, "
-                f"observations={len(points_map)}, "
-                f"dt_cloud={cloud_dt*1000.0:.1f}ms, dt_odom={odom_dt*1000.0:.1f}ms, "
+                f"observations={len(points_world)}, "
+                f"dt_image_cloud={image_cloud_dt*1000.0:.1f}ms, "
+                f"dt_cloud_odom={cloud_odom_dt*1000.0:.1f}ms, "
                 f"total_obs={self.obs_count}",
                 throttle_duration_sec=1.0,
             )
