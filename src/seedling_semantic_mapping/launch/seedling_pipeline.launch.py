@@ -37,6 +37,13 @@ def generate_launch_description():
         ),
         Node(
             package='seedling_semantic_mapping',
+            executable='rolling_submap_builder',
+            name='rolling_submap_builder',
+            parameters=[config_file],
+            output='screen',
+        ),
+        Node(
+            package='seedling_semantic_mapping',
             executable=localizer_executable,
             name='yolo_sep_localizer',
             parameters=[config_file],

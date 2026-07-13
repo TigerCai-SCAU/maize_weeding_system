@@ -12,12 +12,13 @@ which is included as part of this source code package.
 
 #include "vio.h"
 
+#include <algorithm>
+
 using namespace Eigen;
 VIOManager::VIOManager()
 {
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
 }
-
 VIOManager::~VIOManager()
 {
   delete visual_submap;
@@ -348,6 +349,97 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
     demoniator2 += (cur_patch[i] - mean_curr) * (cur_patch[i] - mean_curr);
   }
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
+}
+
+void VIOManager::pruneVisualMap()
+{
+  if (feat_map.empty() || visual_map_radius <= 0.0 || !new_frame_)
+  {
+    return;
+  }
+
+  const V3D current_pos = new_frame_->pos();
+  const double max_distance_sq = visual_map_radius * visual_map_radius;
+  std::size_t removed_voxels = 0;
+  std::size_t removed_points = 0;
+
+  for (auto it = feat_map.begin(); it != feat_map.end();)
+  {
+    VOXEL_POINTS *voxel = it->second;
+    if (voxel == nullptr)
+    {
+      it = feat_map.erase(it);
+      ++removed_voxels;
+      continue;
+    }
+
+    auto &points = voxel->voxel_points;
+    auto new_end = std::remove_if(
+        points.begin(),
+        points.end(),
+        [&](VisualPoint *point)
+        {
+          if (point == nullptr)
+          {
+            ++removed_points;
+            return true;
+          }
+
+          if ((point->pos_ - current_pos).squaredNorm() > max_distance_sq)
+          {
+            delete point;
+            ++removed_points;
+            return true;
+          }
+          return false;
+        });
+    points.erase(new_end, points.end());
+
+    if (points.size() > visual_map_max_points_per_voxel)
+    {
+      const std::size_t excess =
+          points.size() - visual_map_max_points_per_voxel;
+      for (std::size_t i = 0; i < excess; ++i)
+      {
+        delete points[i];
+        ++removed_points;
+      }
+      points.erase(points.begin(), points.begin() + excess);
+    }
+
+    if (points.empty())
+    {
+      delete voxel;
+      it = feat_map.erase(it);
+      ++removed_voxels;
+    }
+    else
+    {
+      ++it;
+    }
+  }
+
+  // Cached warps refer to Feature objects owned by VisualPoint.  Rebuild the
+  // cache after pruning to avoid retaining stale pointers.
+  if (removed_points > 0 && !normal_en)
+  {
+    for (auto &entry : warp_map)
+    {
+      delete entry.second;
+    }
+    warp_map.clear();
+  }
+
+  if ((removed_points > 0 || removed_voxels > 0) &&
+      frame_count % 30 == 0)
+  {
+    printf(
+        "[ VIO ] Prune visual map: removed_voxels=%zu, "
+        "removed_points=%zu, remaining_voxels=%zu\n",
+        removed_voxels,
+        removed_points,
+        feat_map.size());
+  }
 }
 
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -1801,6 +1893,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   updateFrameState(*state);
   
   resetGrid();
+
+  // Keep the visual sparse map bounded just like the LiDAR voxel map.
+  visual_submap->reset();
+  pruneVisualMap();
 
   double t1 = omp_get_wtime();
 

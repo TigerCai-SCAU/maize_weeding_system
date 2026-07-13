@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     common:
-      img_topic: "/left_camera/image"
+      img_topic: "/miivii_gmsl/image3"
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
       img_en: 1
@@ -63,9 +63,9 @@
       layer_init_num: [5, 5, 5, 5, 5]
 
     local_map:  
-      map_sliding_en: false
-      half_map_size: 100
-      sliding_thresh: 8.0
+      map_sliding_en: true
+      half_map_size: 20
+      sliding_thresh: 2.0
 
     uav:
       imu_rate_odom: false

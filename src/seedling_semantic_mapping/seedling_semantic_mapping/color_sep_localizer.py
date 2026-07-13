@@ -500,6 +500,8 @@ class ColorSepLocalizer(YoloSepLocalizer):
                 throttle_duration_sec=2.0,
             )
             return
+        if not self.accept_cloud_once(cloud_msg):
+            return
 
         if not detections:
             return
@@ -566,10 +568,13 @@ def main(args=None) -> None:
 
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

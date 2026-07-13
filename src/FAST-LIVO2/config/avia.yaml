@@ -61,9 +61,11 @@
       layer_init_num: [5, 5, 5, 5, 5]
 
     local_map:  
-      map_sliding_en: false
-      half_map_size: 100
-      sliding_thresh: 8.0
+      # half_map_size is measured in top-level voxels. With voxel_size=0.5,
+      # 20 keeps an approximately +/-10 m localization map.
+      map_sliding_en: true
+      half_map_size: 20
+      sliding_thresh: 2.0
 
     uav:
       imu_rate_odom: false

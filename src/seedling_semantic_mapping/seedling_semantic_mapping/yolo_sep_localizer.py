@@ -151,6 +151,7 @@ class YoloSepLocalizer(Node):
         # Backward compatibility with the older config key.
         self.declare_parameter("max_sync_dt", 0.08)
         self.declare_parameter("cache_size", 50)
+        self.declare_parameter("process_each_cloud_once", True)
 
         # Camera intrinsics. Use values at original calibration resolution, then
         # multiply by intrinsic_scale if FAST-LIVO/image was resized.
@@ -211,6 +212,10 @@ class YoloSepLocalizer(Node):
         if self.max_cloud_odom_dt <= 0.0:
             self.max_cloud_odom_dt = legacy_max_sync_dt
         self.cache_size = int(self.get_parameter("cache_size").value)
+        self.process_each_cloud_once = bool(
+            self.get_parameter("process_each_cloud_once").value
+        )
+        self.last_processed_cloud_key: Optional[Tuple[int, int]] = None
 
         scale = float(self.get_parameter("intrinsic_scale").value)
         self.fx = float(self.get_parameter("cam_fx").value) * scale
@@ -286,6 +291,14 @@ class YoloSepLocalizer(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
+        # Detection is intentionally latest-frame-only. A deep image queue makes
+        # slow inference process stale images that no longer match the cloud cache.
+        qos_image = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         qos_pub = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
@@ -311,7 +324,7 @@ class YoloSepLocalizer(Node):
             Image,
             self.image_topic,
             self.image_cb,
-            qos_sensor,
+            qos_image,
             callback_group=self.image_cb_group,
         )
 
@@ -356,6 +369,18 @@ class YoloSepLocalizer(Node):
         item = min(cache, key=lambda o: abs(o.stamp_sec - t))
         dt = abs(item.stamp_sec - t)
         return (item.msg, dt) if dt <= self.max_cloud_odom_dt else (None, dt)
+
+    def accept_cloud_once(self, cloud_msg: PointCloud2) -> bool:
+        if not self.process_each_cloud_once:
+            return True
+        key = (
+            int(cloud_msg.header.stamp.sec),
+            int(cloud_msg.header.stamp.nanosec),
+        )
+        if key == self.last_processed_cloud_key:
+            return False
+        self.last_processed_cloud_key = key
+        return True
 
     def run_yolo(self, img_rgb: np.ndarray) -> List[SepDetection]:
         if self.model is None:
@@ -431,6 +456,20 @@ class YoloSepLocalizer(Node):
         return kept
 
     def pointcloud_to_xyz(self, cloud_msg: PointCloud2) -> np.ndarray:
+        try:
+            arr = point_cloud2.read_points_numpy(
+                cloud_msg,
+                field_names=("x", "y", "z"),
+                skip_nans=True,
+            )
+            arr = np.asarray(arr, dtype=np.float64).reshape(-1, 3)
+            if self.cloud_stride > 1:
+                arr = arr[::self.cloud_stride]
+            finite = np.isfinite(arr).all(axis=1)
+            return arr[finite]
+        except (AttributeError, ValueError, TypeError):
+            pass
+
         pts = []
         idx = 0
         for p in point_cloud2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True):
@@ -699,6 +738,8 @@ class YoloSepLocalizer(Node):
                 throttle_duration_sec=2.0,
             )
             return
+        if not self.accept_cloud_once(cloud_msg):
+            return
 
         try:
             img = image_msg_to_numpy(msg)
@@ -759,7 +800,8 @@ def main() -> None:
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

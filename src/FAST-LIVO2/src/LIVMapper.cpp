@@ -258,13 +258,25 @@ void LIVMapper::initializeFiles()
 void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node, image_transport::ImageTransport &it_)
 {
   image_transport::ImageTransport it(this->node);
+  auto lidar_qos = rclcpp::SensorDataQoS().keep_last(20);
+  auto imu_qos = rclcpp::SensorDataQoS().keep_last(500);
+  auto image_qos = rclcpp::SensorDataQoS().keep_last(2);
+
   if (p_pre->lidar_type == AVIA) {
-    sub_pcl = this->node->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 200000, std::bind(&LIVMapper::livox_pcl_cbk, this, std::placeholders::_1));
+    sub_pcl = this->node->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        lid_topic, lidar_qos,
+        std::bind(&LIVMapper::livox_pcl_cbk, this, std::placeholders::_1));
   } else {
-    sub_pcl = this->node->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, 200000, std::bind(&LIVMapper::standard_pcl_cbk, this, std::placeholders::_1));
+    sub_pcl = this->node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        lid_topic, lidar_qos,
+        std::bind(&LIVMapper::standard_pcl_cbk, this, std::placeholders::_1));
   }
-  sub_imu = this->node->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 200000, std::bind(&LIVMapper::imu_cbk, this, std::placeholders::_1));
-  sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(img_topic, 200000, std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
+  sub_imu = this->node->create_subscription<sensor_msgs::msg::Imu>(
+      imu_topic, imu_qos,
+      std::bind(&LIVMapper::imu_cbk, this, std::placeholders::_1));
+  sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(
+      img_topic, image_qos,
+      std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
   
   pubLaserCloudFullRes = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pubNormal = this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/visualization_marker", 100);
@@ -966,16 +978,17 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
 
 cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg)
 {
-  cv::Mat img;
-  img = cv_bridge::toCvShare(img_msg, "bgr8")->image;
-  return img;
+  // Own the converted BGR buffer after this function returns.  The previous
+  // toCvShare() result could alias the ROS message after its lifetime ended.
+  return cv_bridge::toCvCopy(img_msg, "bgr8")->image;
 }
 
 // static int i = 0;
 void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
 {
   if (!img_en) return;
-  sensor_msgs::msg::Image::SharedPtr msg(new sensor_msgs::msg::Image(*msg_in));
+  // Do not deep-copy the full-resolution ROS image before conversion.
+  const auto &msg = msg_in;
   // if ((abs(stamp2Sec(msg->header.stamp) - last_timestamp_img) > 0.2 && last_timestamp_img > 0) || sync_jump_flag)
   // {
   //   RCLCPP_WARN(this->node->get_logger(), "img jumps %.3f\n", stamp2Sec(msg->header.stamp) - last_timestamp_img);
@@ -1014,7 +1027,15 @@ void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
   }
 
   cv::Mat img_cur = getImageFromMsg(msg);
-  img_buffer.push_back(img_cur);
+
+  // Real-time operation: never process an ever-growing queue of stale images.
+  constexpr std::size_t kMaxImageBufferSize = 2;
+  while (img_buffer.size() >= kMaxImageBufferSize)
+  {
+    img_buffer.pop_front();
+    img_time_buffer.pop_front();
+  }
+  img_buffer.push_back(std::move(img_cur));
   img_time_buffer.push_back(img_time_correct);
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
@@ -1268,8 +1289,15 @@ void LIVMapper::publish_img_rgb(const image_transport::Publisher &pubImage, VIOM
 {
   cv::Mat img_rgb = vio_manager->img_cp;
   cv_bridge::CvImage out_msg;
-  out_msg.header.stamp = this->node->get_clock()->now();
-  // out_msg.header.frame_id = "camera_init";
+  if (!LidarMeasures.measures.empty())
+  {
+    out_msg.header.stamp = sec2Stamp(
+        LidarMeasures.measures.back().vio_time);
+  }
+  else
+  {
+    out_msg.header.stamp = this->node->get_clock()->now();
+  }
   out_msg.encoding = sensor_msgs::image_encodings::BGR8;
   out_msg.image = img_rgb;
   pubImage.publish(out_msg.toImageMsg());
@@ -1278,6 +1306,9 @@ void LIVMapper::publish_img_rgb(const image_transport::Publisher &pubImage, VIOM
 // Provide output format for LiDAR-visual BA
 void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager)
 {
+  // In LIVO mode only VIO creates a valid RGB cloud.  The LIO half-cycle used
+  // to publish an empty PointCloud2 with no fields.
+  if (slam_mode_ == LIVO && LidarMeasures.lio_vio_flg != VIO) return;
   if (pcl_w_wait_pub->empty()) return;
   PointCloudXYZRGB::Ptr laserCloudWorldRGB(new PointCloudXYZRGB());
   static int pub_num = 1;

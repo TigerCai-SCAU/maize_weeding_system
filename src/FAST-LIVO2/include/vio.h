@@ -108,6 +108,10 @@ public:
 
   double img_point_cov, outlier_threshold, ncc_thre;
   
+  // Bound the persistent visual sparse map for long-running operation.
+  double visual_map_radius = 12.0;
+  std::size_t visual_map_max_points_per_voxel = 40;
+
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
@@ -152,6 +156,7 @@ public:
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
   void computeJacobianAndUpdateEKF(cv::Mat img);
   void resetGrid();
+  void pruneVisualMap();
   void updateVisualMapPoints(cv::Mat img);
   void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
                            const int level_ref, 

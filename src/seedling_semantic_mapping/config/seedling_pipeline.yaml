@@ -3,7 +3,7 @@ yolo_sep_localizer:
     # 外部同步方案：FAST-LIVO 尽量少改，只额外输出当前帧去畸变 body 点云。
     # YOLO 用彩色图，不再用 FAST-LIVO 内部灰度图。
     image_topic: /miivii_gmsl/image3
-    cloud_topic: /fastlivo/deskew/cloud_body
+    cloud_topic: /seedling/local_submap_body
     cloud_frame: body                 # body: 点云为 FAST-LIVO body/IMU 坐标；lidar: 点云已经是 LiDAR 坐标
     odom_topic: /aft_mapped_to_init
     world_frame: camera_init
@@ -23,8 +23,8 @@ yolo_sep_localizer:
 
     # 图像作为触发源，找最近的去畸变点云和里程计。
     # 图像只负责选择点云；点云时间再选择里程计。
-    max_image_cloud_dt: 0.12
-    max_cloud_odom_dt: 0.06
+    max_image_cloud_dt: 0.06
+    max_cloud_odom_dt: 0.03
     max_image_odom_dt: 0.08  # 旧参数，仅为兼容保留
     max_sync_dt: 0.08        # 兼容旧参数
     cache_size: 50
@@ -103,13 +103,13 @@ seedling_mapper:
     # Data association. 先放宽，跑通后再收紧。
     gate_xy: 0.12
     gate_z: 0.25
-    confirm_hits: 2
+    confirm_hits: 3
     min_update_dt: 0.20
     position_alpha: 0.15
     publish_all_landmarks: false
     map_points_confirmed_only: true   # /seedling/map_points 只发布 confirmed 苗点，给路径规划用
     save_every_update: true
-    same_stamp_duplicate_policy: allow
+    same_stamp_duplicate_policy: skip
     max_same_stamp_history: 20
     tentative_timeout_sec: 10.0
 
@@ -118,3 +118,25 @@ odom_tf_broadcaster:
     odom_topic: /aft_mapped_to_init
     parent_frame: camera_init
     child_frame: body
+
+rolling_submap_builder:
+  ros__parameters:
+    input_cloud_topic: /cloud_registered
+    odom_topic: /aft_mapped_to_init
+    output_cloud_topic: /seedling/local_submap_body
+    world_frame: camera_init
+    body_frame: body
+
+    # Keep recent non-repetitive scans, but only inside the active work zone.
+    window_sec: 1.0
+    publish_rate_hz: 10.0
+    voxel_size_m: 0.02
+    forward_m: 5.0
+    backward_m: 2.0
+    lateral_half_width_m: 1.5
+    below_m: 1.0
+    above_m: 1.5
+    crop_margin_m: 1.0
+    cloud_stride: 1
+    max_points: 60000
+    min_points: 100
