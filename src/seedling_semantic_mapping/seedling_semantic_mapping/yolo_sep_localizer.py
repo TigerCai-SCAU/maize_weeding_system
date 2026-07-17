@@ -3,8 +3,8 @@
 
 Inputs:
   - color image from camera node, preferably a 10 Hz rgb8 image
-  - deskewed cloud from FAST-LIVO2, preferably in body/IMU frame
   - FAST-LIVO2 odometry T_map_body
+  - persistent 2.5D terrain from ground_mapper
 
 Output:
   - geometry_msgs/PointStamped observations in map frame
@@ -36,6 +36,13 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from visualization_msgs.msg import Marker, MarkerArray
+
+from .terrain_ray import (
+    InterpolatedPose,
+    TerrainHeightMap,
+    interpolate_pose,
+    quaternion_to_rotation,
+)
 
 
 @dataclass
@@ -132,6 +139,29 @@ class YoloSepLocalizer(Node):
         # Keep this honest until a RTK/GTSAM map->camera_init transform is applied.
         self.declare_parameter("world_frame", "camera_init")
 
+        # Terrain-ray localization. The camera timestamp is shifted into the
+        # FAST-LIVO clock convention, then bracketed odometry poses are
+        # interpolated before the ray is intersected with the persistent map.
+        self.declare_parameter(
+            "terrain_topic",
+            "/ground/global_elevation_points",
+        )
+        self.declare_parameter("image_time_offset_sec", 0.1)
+        self.declare_parameter("max_odom_bracket_gap_sec", 0.25)
+        self.declare_parameter("pending_image_queue_size", 3)
+        self.declare_parameter("max_terrain_age_sec", 3.0)
+        self.declare_parameter("terrain_resolution_m", 0.05)
+        self.declare_parameter("terrain_vertical_axis", 0)
+        self.declare_parameter("terrain_horizontal_axes", [1, 2])
+        self.declare_parameter("terrain_lookup_radius_m", 0.08)
+        self.declare_parameter("terrain_min_neighbors", 1)
+        self.declare_parameter("ray_min_range_m", 0.10)
+        self.declare_parameter("ray_max_range_m", 8.0)
+        self.declare_parameter("ray_step_m", 0.025)
+        self.declare_parameter("ray_height_tolerance_m", 0.02)
+        self.declare_parameter("ray_max_valid_gap_m", 0.15)
+        self.declare_parameter("ray_min_vertical_component", 0.02)
+
         # YOLO / SEP detection
         self.declare_parameter("model_path", "")
         self.declare_parameter("device", "")  # e.g. "cpu", "0"
@@ -143,7 +173,8 @@ class YoloSepLocalizer(Node):
         self.declare_parameter("max_detections", 50)
         self.declare_parameter("nms_sep_px", 12.0)
 
-        # Synchronization. Image selects the nearest cloud; cloud time selects odom.
+        # Legacy point-neighborhood parameters remain declared so old launch
+        # files do not fail, but terrain-ray localization does not use them.
         self.declare_parameter("max_image_cloud_dt", 0.08)
         self.declare_parameter("max_cloud_odom_dt", 0.03)
         # Deprecated compatibility key. It is no longer used for lookup.
@@ -202,6 +233,52 @@ class YoloSepLocalizer(Node):
         self.observation_topic = self.get_parameter("observation_topic").value
         self.marker_topic = self.get_parameter("marker_topic").value
         self.world_frame = str(self.get_parameter("world_frame").value).strip()
+        self.terrain_topic = str(self.get_parameter("terrain_topic").value)
+        self.image_time_offset_sec = float(
+            self.get_parameter("image_time_offset_sec").value
+        )
+        self.max_odom_bracket_gap_sec = float(
+            self.get_parameter("max_odom_bracket_gap_sec").value
+        )
+        self.pending_image_queue_size = max(
+            2,
+            int(self.get_parameter("pending_image_queue_size").value),
+        )
+        self.max_terrain_age_sec = float(
+            self.get_parameter("max_terrain_age_sec").value
+        )
+        self.terrain_resolution_m = float(
+            self.get_parameter("terrain_resolution_m").value
+        )
+        self.terrain_vertical_axis = int(
+            self.get_parameter("terrain_vertical_axis").value
+        )
+        self.terrain_horizontal_axes = tuple(
+            int(axis)
+            for axis in self.get_parameter("terrain_horizontal_axes").value
+        )
+        self.terrain_lookup_radius_m = float(
+            self.get_parameter("terrain_lookup_radius_m").value
+        )
+        self.terrain_min_neighbors = int(
+            self.get_parameter("terrain_min_neighbors").value
+        )
+        self.ray_min_range_m = float(
+            self.get_parameter("ray_min_range_m").value
+        )
+        self.ray_max_range_m = float(
+            self.get_parameter("ray_max_range_m").value
+        )
+        self.ray_step_m = float(self.get_parameter("ray_step_m").value)
+        self.ray_height_tolerance_m = float(
+            self.get_parameter("ray_height_tolerance_m").value
+        )
+        self.ray_max_valid_gap_m = float(
+            self.get_parameter("ray_max_valid_gap_m").value
+        )
+        self.ray_min_vertical_component = float(
+            self.get_parameter("ray_min_vertical_component").value
+        )
 
         legacy_max_sync_dt = float(self.get_parameter("max_sync_dt").value)
         self.max_image_cloud_dt = float(self.get_parameter("max_image_cloud_dt").value)
@@ -262,12 +339,18 @@ class YoloSepLocalizer(Node):
 
         self.cloud_cache: Deque[CloudCacheItem] = deque(maxlen=self.cache_size)
         self.odom_cache: Deque[OdomCacheItem] = deque(maxlen=self.cache_size)
+        self.terrain_map: Optional[TerrainHeightMap] = None
+        self.terrain_stamp_sec: Optional[float] = None
+        self.pending_images: Deque[Image] = deque(
+            maxlen=self.pending_image_queue_size
+        )
 
         # 图像处理较重，必须允许点云和里程计回调并行更新缓存。
         self.cache_lock = threading.Lock()
         self.image_cb_group = MutuallyExclusiveCallbackGroup()
         self.cloud_cb_group = MutuallyExclusiveCallbackGroup()
         self.odom_cb_group = MutuallyExclusiveCallbackGroup()
+        self.terrain_cb_group = MutuallyExclusiveCallbackGroup()
 
         self.model = None
         model_path = str(self.get_parameter("model_path").value)
@@ -306,13 +389,6 @@ class YoloSepLocalizer(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
 
-        self.cloud_sub = self.create_subscription(
-            PointCloud2,
-            self.cloud_topic,
-            self.cloud_cb,
-            qos_sensor,
-            callback_group=self.cloud_cb_group,
-        )
         self.odom_sub = self.create_subscription(
             Odometry,
             self.odom_topic,
@@ -320,11 +396,23 @@ class YoloSepLocalizer(Node):
             qos_pub,
             callback_group=self.odom_cb_group,
         )
+        self.terrain_sub = self.create_subscription(
+            PointCloud2,
+            self.terrain_topic,
+            self.terrain_cb,
+            qos_sensor,
+            callback_group=self.terrain_cb_group,
+        )
         self.image_sub = self.create_subscription(
             Image,
             self.image_topic,
-            self.image_cb,
+            self.queue_image_cb,
             qos_image,
+            callback_group=self.image_cb_group,
+        )
+        self.image_timer = self.create_timer(
+            0.02,
+            self.process_pending_image_cb,
             callback_group=self.image_cb_group,
         )
 
@@ -334,8 +422,13 @@ class YoloSepLocalizer(Node):
         self.frame_count = 0
         self.obs_count = 0
         self.get_logger().info(
-            "YoloSepLocalizer started. image=%s cloud=%s cloud_frame=%s odom=%s obs=%s"
-            % (self.image_topic, self.cloud_topic, self.cloud_frame, self.odom_topic, self.observation_topic)
+            "YoloSepLocalizer started. image=%s terrain=%s odom=%s obs=%s"
+            % (
+                self.image_topic,
+                self.terrain_topic,
+                self.odom_topic,
+                self.observation_topic,
+            )
         )
 
     def cloud_cb(self, msg: PointCloud2) -> None:
@@ -344,9 +437,158 @@ class YoloSepLocalizer(Node):
             self.cloud_cache.append(item)
 
     def odom_cb(self, msg: Odometry) -> None:
+        frame_id = msg.header.frame_id or self.world_frame
+        if frame_id != self.world_frame:
+            self.get_logger().error(
+                f"odom frame is '{frame_id}', expected '{self.world_frame}'",
+                throttle_duration_sec=2.0,
+            )
+            return
         item = OdomCacheItem(stamp_to_sec(msg.header.stamp), msg)
         with self.cache_lock:
             self.odom_cache.append(item)
+
+    def terrain_cb(self, msg: PointCloud2) -> None:
+        frame_id = msg.header.frame_id or self.world_frame
+        if frame_id != self.world_frame:
+            self.get_logger().error(
+                f"terrain frame is '{frame_id}', expected '{self.world_frame}'",
+                throttle_duration_sec=2.0,
+            )
+            return
+        points = self.pointcloud_to_xyz(msg)
+        if points.shape[0] == 0:
+            return
+        try:
+            terrain_map = TerrainHeightMap(
+                points=points,
+                resolution_m=self.terrain_resolution_m,
+                vertical_axis=self.terrain_vertical_axis,
+                horizontal_axes=self.terrain_horizontal_axes,
+                lookup_radius_m=self.terrain_lookup_radius_m,
+                min_neighbors=self.terrain_min_neighbors,
+            )
+        except ValueError as exc:
+            self.get_logger().error(f"invalid terrain map: {exc}")
+            return
+        with self.cache_lock:
+            self.terrain_map = terrain_map
+            self.terrain_stamp_sec = stamp_to_sec(msg.header.stamp)
+
+    def interpolated_odom_pose(
+        self,
+        query_time: float,
+    ) -> Tuple[Optional[InterpolatedPose], Optional[float]]:
+        with self.cache_lock:
+            cache = sorted(self.odom_cache, key=lambda item: item.stamp_sec)
+        if len(cache) < 2:
+            return None, None
+        before = None
+        after = None
+        for item in cache:
+            if item.stamp_sec <= query_time:
+                before = item
+            if item.stamp_sec >= query_time:
+                after = item
+                break
+        if before is None or after is None:
+            return None, None
+        if before.stamp_sec == after.stamp_sec:
+            msg = before.msg
+            position = msg.pose.pose.position
+            orientation = msg.pose.pose.orientation
+            return InterpolatedPose(
+                translation=np.array(
+                    [position.x, position.y, position.z],
+                    dtype=np.float64,
+                ),
+                quaternion_xyzw=np.array(
+                    [orientation.x, orientation.y, orientation.z, orientation.w],
+                    dtype=np.float64,
+                ),
+            ), 0.0
+        gap = after.stamp_sec - before.stamp_sec
+        if gap > self.max_odom_bracket_gap_sec:
+            return None, gap
+
+        def components(item: OdomCacheItem):
+            position = item.msg.pose.pose.position
+            orientation = item.msg.pose.pose.orientation
+            return (
+                np.array([position.x, position.y, position.z], dtype=np.float64),
+                np.array(
+                    [orientation.x, orientation.y, orientation.z, orientation.w],
+                    dtype=np.float64,
+                ),
+            )
+
+        translation0, quaternion0 = components(before)
+        translation1, quaternion1 = components(after)
+        try:
+            pose = interpolate_pose(
+                before.stamp_sec,
+                translation0,
+                quaternion0,
+                after.stamp_sec,
+                translation1,
+                quaternion1,
+                query_time,
+            )
+        except ValueError:
+            return None, gap
+        return pose, gap
+
+    def camera_ray_world(
+        self,
+        det: SepDetection,
+        pose: InterpolatedPose,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        ray_camera = self.pixel_to_camera_ray(det.u, det.v)
+        camera_origin_lidar = -self.Rcl.T @ self.Pcl
+        ray_lidar = self.Rcl.T @ ray_camera
+        camera_origin_body = self.extR @ camera_origin_lidar + self.extT
+        ray_body = self.extR @ ray_lidar
+        rotation_world_body = quaternion_to_rotation(pose.quaternion_xyzw)
+        origin_world = (
+            rotation_world_body @ camera_origin_body + pose.translation
+        )
+        ray_world = rotation_world_body @ ray_body
+        ray_world /= np.linalg.norm(ray_world)
+        return origin_world, ray_world
+
+    def queue_image_cb(self, msg: Image) -> None:
+        """Keep a tiny bounded queue while waiting for future odometry."""
+        with self.cache_lock:
+            self.pending_images.append(msg)
+
+    def process_pending_image_cb(self) -> None:
+        with self.cache_lock:
+            pending = list(self.pending_images)
+        if not pending:
+            return
+
+        selected = None
+        selected_pose = None
+        selected_gap = None
+        for msg in reversed(pending):
+            pose_time = (
+                stamp_to_sec(msg.header.stamp) + self.image_time_offset_sec
+            )
+            pose, odom_gap = self.interpolated_odom_pose(pose_time)
+            if pose is not None:
+                selected = msg
+                selected_pose = pose
+                selected_gap = odom_gap
+                break
+        if selected is None or selected_pose is None:
+            return
+
+        with self.cache_lock:
+            while self.pending_images:
+                removed = self.pending_images.popleft()
+                if removed is selected:
+                    break
+        self.process_image(selected, selected_pose, float(selected_gap))
 
     def nearest_cloud(self, t: float) -> Tuple[Optional[PointCloud2], Optional[float]]:
         with self.cache_lock:
@@ -700,45 +942,34 @@ class YoloSepLocalizer(Node):
             ma.markers.append(m)
         self.marker_pub.publish(ma)
 
-    def image_cb(self, msg: Image) -> None:
+    def process_image(
+        self,
+        msg: Image,
+        pose: InterpolatedPose,
+        odom_gap: float,
+    ) -> None:
         self.frame_count += 1
         image_time = stamp_to_sec(msg.header.stamp)
-        cloud_msg, image_cloud_dt = self.nearest_cloud(image_time)
-        if cloud_msg is None:
-            cloud_dt_s = (
-                "none"
-                if image_cloud_dt is None
-                else f"{image_cloud_dt*1000.0:.1f}ms"
-            )
-            self.get_logger().warn(
-                f"Waiting cloud near image: dt={cloud_dt_s}",
-                throttle_duration_sec=2.0,
-            )
-            return
+        pose_time = image_time + self.image_time_offset_sec
 
-        cloud_time = stamp_to_sec(cloud_msg.header.stamp)
-        odom_msg, cloud_odom_dt = self.nearest_odom(cloud_time)
-        if odom_msg is None:
-            odom_dt_s = (
-                "none"
-                if cloud_odom_dt is None
-                else f"{cloud_odom_dt*1000.0:.1f}ms"
-            )
+        with self.cache_lock:
+            terrain_map = self.terrain_map
+            terrain_stamp_sec = self.terrain_stamp_sec
+        if terrain_map is None or terrain_stamp_sec is None:
             self.get_logger().warn(
-                f"Waiting odom near cloud: dt={odom_dt_s}",
+                f"Waiting terrain on {self.terrain_topic}",
                 throttle_duration_sec=2.0,
             )
             return
-
-        odom_frame = odom_msg.header.frame_id or self.world_frame
-        if odom_frame != self.world_frame:
-            self.get_logger().error(
-                f"odom frame is '{odom_frame}', configured world_frame is "
-                f"'{self.world_frame}'. A frame transform is required.",
+        terrain_age = abs(pose_time - terrain_stamp_sec)
+        if (
+            self.max_terrain_age_sec > 0.0
+            and terrain_age > self.max_terrain_age_sec
+        ):
+            self.get_logger().warn(
+                f"Terrain map is stale: age={terrain_age:.3f}s",
                 throttle_duration_sec=2.0,
             )
-            return
-        if not self.accept_cloud_once(cloud_msg):
             return
 
         try:
@@ -751,23 +982,30 @@ class YoloSepLocalizer(Node):
         if not detections:
             return
 
-        pts_cloud = self.pointcloud_to_xyz(cloud_msg)
-        if pts_cloud.shape[0] == 0:
-            return
-        pts_lidar = self.cloud_points_to_lidar(pts_cloud)
-        uv, valid = self.project_lidar_points(pts_lidar)
-
         points_world: List[np.ndarray] = []
         for det in detections:
-            p_lidar = self.localize_sep_in_lidar(det, pts_lidar, uv, valid)
-            if p_lidar is None:
+            origin_world, ray_world = self.camera_ray_world(det, pose)
+            if (
+                abs(ray_world[self.terrain_vertical_axis])
+                < self.ray_min_vertical_component
+            ):
                 continue
-            p_world = self.lidar_to_world(p_lidar, odom_msg)
+            p_world = terrain_map.intersect_ray(
+                origin=origin_world,
+                direction=ray_world,
+                min_range_m=self.ray_min_range_m,
+                max_range_m=self.ray_max_range_m,
+                step_m=self.ray_step_m,
+                height_tolerance_m=self.ray_height_tolerance_m,
+                max_valid_gap_m=self.ray_max_valid_gap_m,
+            )
+            if p_world is None:
+                continue
             if not np.isfinite(p_world).all():
                 continue
 
             obs = PointStamped()
-            obs.header.stamp = cloud_msg.header.stamp
+            obs.header.stamp = msg.header.stamp
             obs.header.frame_id = self.world_frame
             obs.point.x = float(p_world[0])
             obs.point.y = float(p_world[1])
@@ -777,12 +1015,13 @@ class YoloSepLocalizer(Node):
             points_world.append(p_world)
 
         if points_world:
-            self.publish_observation_marker(points_world, cloud_msg.header.stamp)
+            self.publish_observation_marker(points_world, msg.header.stamp)
             self.get_logger().info(
                 f"frame={self.frame_count}, detections={len(detections)}, "
                 f"observations={len(points_world)}, "
-                f"dt_image_cloud={image_cloud_dt*1000.0:.1f}ms, "
-                f"dt_cloud_odom={cloud_odom_dt*1000.0:.1f}ms, "
+                f"pose_time_offset={self.image_time_offset_sec:.3f}s, "
+                f"odom_bracket={odom_gap:.3f}s, "
+                f"terrain_cells={len(terrain_map)}, "
                 f"total_obs={self.obs_count}",
                 throttle_duration_sec=1.0,
             )

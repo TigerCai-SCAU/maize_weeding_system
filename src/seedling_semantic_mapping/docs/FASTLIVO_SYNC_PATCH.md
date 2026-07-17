@@ -1,6 +1,83 @@
-# FAST-LIVO2 同步数据出口修改说明
+# FAST-LIVO2 与 terrain-ray 的接口说明
 
-本功能包默认 FAST-LIVO2 已经输出以下同步 topic：
+当前 terrain-ray 方案不再需要 FAST-LIVO2 发布
+`/fastlivo/semantic_sync/*`，也不需要在检测像素附近查询当前帧 LiDAR 点。
+不要为苗点定位继续修改 FAST-LIVO 的图像或点云主线程。
+
+## 所需接口
+
+```text
+/aft_mapped_to_init               nav_msgs/Odometry
+/cloud_registered                sensor_msgs/PointCloud2
+/ground/global_elevation_points  sensor_msgs/PointCloud2
+```
+
+- `/aft_mapped_to_init` 由 FAST-LIVO 发布，terrain-ray 用它插值图像曝光时刻的
+  `camera_init -> body` 位姿。
+- `/cloud_registered` 由 `ground_mapper` 使用，用于维护持久 2.5D 地形。
+- `/ground/global_elevation_points` 由 `ground_mapper` 发布，苗点定位只与
+  这个地形求交。
+
+苗点输出仍是：
+
+```text
+/seedling/observation_point_map
+```
+
+`seedling_mapper` 的订阅和输出接口没有变化。
+
+## 时间关系
+
+```text
+t_query = t_image + image_time_offset_sec
+```
+
+`yolo_sep_localizer` 在缓存中查找 `t_query` 前后的两帧
+`/aft_mapped_to_init`，平移使用线性插值，旋转使用四元数 SLERP。没有包围
+位姿时拒绝该图像，不使用最近邻位姿冒充同步结果。
+
+当前配置：
+
+```yaml
+image_time_offset_sec: 0.10
+max_odom_bracket_gap_sec: 0.25
+```
+
+这两个值都在 `seedling_pipeline.yaml` 中，后续用实车 rosbag 标定。
+
+## 坐标链
+
+检测像素先根据相机内参与畸变参数转换为相机射线，再使用已有外参：
+
+```text
+P_cam = Rcl * P_lidar + Pcl
+P_body = extR * P_lidar + extT
+```
+
+反求相机原点和射线方向到 body，再用插值后的 FAST-LIVO 位姿变换到
+`camera_init`。射线最终与同一 `camera_init` 下的 2.5D 地形求交。
+
+## 启动前检查
+
+```bash
+chronyc waitsync 120 0.01 0 1
+
+ros2 topic echo /aft_mapped_to_init --field header --once
+ros2 topic echo /cloud_registered --field header --once
+ros2 topic echo /ground/global_elevation_points --field header \
+  --qos-reliability best_effort --once
+```
+
+要求：
+
+- 米文时间已经锁定，不能在 FAST-LIVO 运行中发生系统时间大跳变；
+- 三个消息属于同一时间域；
+- odometry 和地形的 `frame_id` 均为 `camera_init`；
+- 地形持续更新且包含相机射线落点附近的地面覆盖。
+
+## 旧方案
+
+以下 topic 属于旧的像素邻域点云方案，当前实现不依赖它们：
 
 ```text
 /fastlivo/semantic_sync/image
@@ -10,92 +87,5 @@
 /fastlivo/semantic_sync/odom
 ```
 
-其中 `image / cloud_lidar / odom` 必须使用同一个 `header.stamp`。苗点定位节点会用这三个 topic 做 2D SEP 到 3D map 点的关联。
-
-## 为什么不要直接查全局地图
-
-不要这样做：
-
-```text
-YOLO 当前图像 -> 去全局点云地图里找最近点
-```
-
-原因：全局地图是多时刻累积结果，和当前图像不严格同步；直接查全局地图容易把苗点投到旧点、重复点或漂移后的点上。
-
-推荐这样做：
-
-```text
-当前同步图像
-当前同步局部点云 cloud_lidar
-当前同步里程计 odom
-        ↓
-SEP 像素 -> 当前局部点云 -> P_lidar -> P_body -> P_map
-        ↓
-seedling_mapper 做多帧地图融合
-```
-
-## 坐标链
-
-LiDAR 点投影到图像：
-
-```text
-P_cam = Rcl * P_lidar + Pcl
-u = fx * X_cam / Z_cam + cx
-v = fy * Y_cam / Z_cam + cy
-```
-
-LiDAR 点转 body：
-
-```text
-P_body = extR * P_lidar + extT
-```
-
-body 点转 map：
-
-```text
-P_map = R_map_body * P_body + t_map_body
-```
-
-## FAST-LIVO2 内部建议发布位置
-
-优先在 `handleVIO()` 处理完一帧图像后发布同步数据，因为苗点来自图像，应该以图像帧为主。
-
-建议在 `initializeSubscribersAndPublishers()` 里创建 publisher：
-
-```cpp
-auto sync_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
-
-pubSemanticSyncImage =
-    this->node->create_publisher<sensor_msgs::msg::Image>(
-        "/fastlivo/semantic_sync/image", sync_qos);
-
-pubSemanticSyncCloudLidar =
-    this->node->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/fastlivo/semantic_sync/cloud_lidar", sync_qos);
-
-pubSemanticSyncCloudBody =
-    this->node->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/fastlivo/semantic_sync/cloud_body", sync_qos);
-
-pubSemanticSyncCloudWorld =
-    this->node->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/fastlivo/semantic_sync/cloud_world", sync_qos);
-
-pubSemanticSyncOdom =
-    this->node->create_publisher<nav_msgs::msg::Odometry>(
-        "/fastlivo/semantic_sync/odom", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
-```
-
-并在每次 VIO 图像帧处理完成后调用同步发布函数。
-
-## 检查时间戳
-
-启动 FAST-LIVO2 后检查：
-
-```bash
-ros2 topic echo /fastlivo/semantic_sync/image --field header.stamp --once
-ros2 topic echo /fastlivo/semantic_sync/cloud_lidar --field header.stamp --once
-ros2 topic echo /fastlivo/semantic_sync/odom --field header.stamp --once
-```
-
-三者应该完全相同或极其接近。若相差超过 `max_sync_dt`，`yolo_sep_localizer` 会丢弃该帧。
+`mid360.yaml` 中若仍保留 `semantic_sync.*` 参数，它们不构成 terrain-ray
+的运行条件。后续整理 FAST-LIVO 版本时可以删除，但无需为本功能补实现。

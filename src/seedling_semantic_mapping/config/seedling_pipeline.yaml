@@ -1,36 +1,51 @@
 yolo_sep_localizer:
   ros__parameters:
-    # 外部同步方案：FAST-LIVO 尽量少改，只额外输出当前帧去畸变 body 点云。
-    # YOLO 用彩色图，不再用 FAST-LIVO 内部灰度图。
+    # YOLO/颜色检测使用原始彩图；3D 定位直接将相机射线与持久
+    # 2.5D 地形求交，不再要求检测像素附近存在 LiDAR 回波。
     image_topic: /miivii_gmsl/image3
-    cloud_topic: /seedling/local_submap_body
-    cloud_frame: body                 # body: 点云为 FAST-LIVO body/IMU 坐标；lidar: 点云已经是 LiDAR 坐标
     odom_topic: /aft_mapped_to_init
+    terrain_topic: /ground/global_elevation_points
     world_frame: camera_init
     observation_topic: /seedling/observation_point_map
     marker_topic: /seedling/current_observation_markers
 
     # YOLO pose model. Set this to your trained SEP keypoint model.
-    model_path: ""
-    device: ""          # "cpu" or "0". Empty lets ultralytics choose.
-    imgsz: 640
+    model_path: "/home/nvidia/maize_models/maize_pose_best.pt"
+    device: "0"         # Jetson CUDA device.
+    imgsz: 960
     det_conf: 0.35
     kp_conf: 0.30
     keypoint_index: 0
-    class_id: -1
+    class_id: 0
     max_detections: 50
     nms_sep_px: 12.0
 
-    # 图像作为触发源，找最近的去畸变点云和里程计。
-    # 图像只负责选择点云；点云时间再选择里程计。
-    max_image_cloud_dt: 0.06
-    max_cloud_odom_dt: 0.03
-    max_image_odom_dt: 0.08  # 旧参数，仅为兼容保留
-    max_sync_dt: 0.08        # 兼容旧参数
-    cache_size: 50
+    # FAST-LIVO 位姿时间：t_pose = t_image + image_time_offset_sec。
+    # 平移线性插值，旋转使用四元数 SLERP；没有前后包围位姿时拒绝定位。
+    image_time_offset_sec: 0.10
+    max_odom_bracket_gap_sec: 0.25
+    pending_image_queue_size: 3
+    cache_size: 200
 
-    # Camera intrinsics. 如果 image_topic 是 1280x1024 彩图，intrinsic_scale=1.0。
-    # 如果你另外发布了 640x512 的降采样彩图，则设 0.5。
+    # /ground/global_elevation_points 的 2.5D 栅格布局。v0.4 默认
+    # camera_init 轴 0 为高程，轴 1/2 为水平栅格轴。
+    max_terrain_age_sec: 3.0
+    terrain_resolution_m: 0.05
+    terrain_vertical_axis: 0
+    terrain_horizontal_axes: [1, 2]
+    terrain_lookup_radius_m: 0.08
+    terrain_min_neighbors: 1
+
+    # 沿去畸变相机射线搜索第一个地形零交叉。
+    ray_min_range_m: 0.10
+    ray_max_range_m: 8.0
+    ray_step_m: 0.025
+    ray_height_tolerance_m: 0.02
+    ray_max_valid_gap_m: 0.15
+    ray_min_vertical_component: 0.02
+
+    # Camera intrinsics calibrated for the native 2880x1860 /miivii_gmsl/image3.
+    # Change intrinsic_scale only if image_topic is resized by the same factor.
     cam_fx: 2067.847367
     cam_fy: 2069.439913
     cam_cx: 1439.099334
@@ -59,16 +74,6 @@ yolo_sep_localizer:
            0.0, 1.0, 0.0,
            0.0, 0.0, 1.0]
     extT: [-0.011, -0.02329, 0.04412]
-
-    # Pixel neighborhood around SEP used to pick projected LiDAR points.
-    search_radius_px: 100.0
-    min_candidate_points: 2
-    max_candidate_points: 30
-    cloud_stride: 1
-    min_depth: 0.05
-    max_depth: 8.0
-    use_plane_intersection: false
-    max_plane_rmse: 0.05
 
     # 橙色乒乓球测试参数。color_sep_localizer 使用这些参数，YOLO 节点会忽略。
     orange_h_low: 5
