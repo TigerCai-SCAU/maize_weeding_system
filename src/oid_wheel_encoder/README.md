@@ -31,13 +31,17 @@ ros2 launch oid_wheel_encoder oid_wheel_encoder.launch.py
 ros2 topic echo /wheel/odom --field twist.twist.linear.x
 ```
 
-For the indoor conveyor, select the bench YAML explicitly:
+For the indoor conveyor, launch the encoder together with the virtual odometry
+adapter:
 
 ```bash
-ros2 launch oid_wheel_encoder oid_wheel_encoder.launch.py \
-  config_file:=$(ros2 pkg prefix --share oid_wheel_encoder)/config/oid_wheel_encoder_bench.yaml
+ros2 launch oid_wheel_encoder oid_wheel_encoder_bench.launch.py
+ros2 topic echo /bench/aft_mapped_to_init --field pose.pose.position
 ```
 
-Both configurations publish forward travel as positive. Calibrate
-`wheel_diameter_m` from a measured travel distance on the actual contact
-surface.
+The adapter keeps `/wheel/odom` unchanged and maps its scalar forward distance
+into a configurable 3D pose. The bench YAML maps one metre of positive belt
+travel to `[0, 0, -1]` metres in `camera_init`, matching the current
+ground-mapper forward-axis convention. Both configurations publish forward
+travel as positive. Calibrate `wheel_diameter_m` from a measured travel
+distance on the actual contact surface.

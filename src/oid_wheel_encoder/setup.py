@@ -23,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "wheel_encoder_node = oid_wheel_encoder.wheel_encoder_node:main",
+            "bench_virtual_odom = oid_wheel_encoder.bench_virtual_odom:main",
         ],
     },
 )

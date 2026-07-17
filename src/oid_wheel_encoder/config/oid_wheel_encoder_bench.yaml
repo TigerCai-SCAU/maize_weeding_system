@@ -19,3 +19,17 @@ oid_wheel_encoder:
     odom_topic: "/wheel/odom"
     frame_id: "wheel_odom"
     child_frame_id: "aft_mapped"
+
+bench_virtual_odom:
+  ros__parameters:
+    input_topic: "/wheel/odom"
+    output_topic: "/bench/aft_mapped_to_init"
+    world_frame: "camera_init"
+    child_frame: "body"
+
+    # In the current camera_init convention, axis 0 is vertical, axis 1 is
+    # lateral, and vehicle forward is negative axis 2.
+    translation_per_meter: [0.0, 0.0, -1.0]
+    origin_xyz: [0.0, 0.0, 0.0]
+    orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+    zero_on_start: true
