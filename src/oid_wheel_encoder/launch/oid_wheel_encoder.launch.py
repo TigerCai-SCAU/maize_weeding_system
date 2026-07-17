@@ -1,21 +1,29 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import PathJoinSubstitution
 
 
 def generate_launch_description() -> LaunchDescription:
-    config = PathJoinSubstitution(
+    default_config = PathJoinSubstitution(
         [FindPackageShare("oid_wheel_encoder"), "config", "oid_wheel_encoder.yaml"]
     )
+    config_file = LaunchConfiguration("config_file")
+
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=default_config,
+                description="Absolute path to the wheel encoder parameter YAML.",
+            ),
             Node(
                 package="oid_wheel_encoder",
                 executable="wheel_encoder_node",
                 name="oid_wheel_encoder",
                 output="screen",
-                parameters=[config],
-            )
+                parameters=[config_file],
+            ),
         ]
     )

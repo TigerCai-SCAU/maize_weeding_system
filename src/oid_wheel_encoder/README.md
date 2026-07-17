@@ -24,12 +24,20 @@ sudo ip link set can0 up
 ip -details link show can0
 ```
 
-Then run:
+The default vehicle configuration keeps the tractor mounting direction:
 
 ```bash
 ros2 launch oid_wheel_encoder oid_wheel_encoder.launch.py
 ros2 topic echo /wheel/odom --field twist.twist.linear.x
 ```
 
-Set `direction: -1` in the YAML if forward motion is negative. Calibrate
-`wheel_diameter_m` from a measured travel distance on the actual soil surface.
+For the indoor conveyor, select the bench YAML explicitly:
+
+```bash
+ros2 launch oid_wheel_encoder oid_wheel_encoder.launch.py \
+  config_file:=$(ros2 pkg prefix --share oid_wheel_encoder)/config/oid_wheel_encoder_bench.yaml
+```
+
+Both configurations publish forward travel as positive. Calibrate
+`wheel_diameter_m` from a measured travel distance on the actual contact
+surface.
