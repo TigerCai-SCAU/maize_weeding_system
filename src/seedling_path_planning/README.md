@@ -23,7 +23,7 @@ Planting standards are used as approximate priors:
 
 - expected row spacing, normally 0.55 or 0.65 m
 - expected plant spacing, normally 0.20 m
-- crop protection radius, normally 0.08 m
+- crop protection radius, currently 0.05 m with no added safety margin
 
 The planner never creates synthetic crop obstacles. Predicted missing slots
 are diagnostics only. Missing sowing therefore leaves workable soil, while
@@ -35,10 +35,18 @@ Each arm is assigned one measured row and sweeps laterally around its own
 seedlings. Plants whose protection zones nearly touch are treated as a cluster
 and passed on the same side; side changes occur in the safe gap between
 clusters. Both paths use the same strictly increasing travel grid. Path height
-is interpolated independently from the 2.5D terrain map.
+is fitted independently from nearby points in the 2.5D terrain map. The local
+plane slope is used to convert the requested normal surface offset into the
+configured height axis, so the depth does not change on rolling ground. A path
+is inhibited instead of guessing a height when local terrain support is
+missing, too steep, or has excessive plane-fit error.
 
 The vehicle config uses `x/y/z = travel/lateral/height`. The bench config uses
-`z/y/x = travel/lateral/height`.
+`z/y/x = travel/lateral/height`. `tool_surface_offset` is signed relative to
+the ground: the vehicle config uses `-0.02` m for 2 cm cultivation depth,
+while the bench config uses `+0.02` m to keep the tool 2 cm above the conveyor.
+`height_axis_up_sign` records whether the configured positive height axis
+points upward (`+1`) or downward (`-1`).
 
 ```bash
 ros2 launch seedling_path_planning spatial_path_planner.launch.py

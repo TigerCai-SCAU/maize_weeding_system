@@ -28,24 +28,29 @@ spatial_path_planner:
 
     # Crop protection and dual-arm S-path geometry. The vehicle/conveyor
     # supplies forward travel; each arm follows one row and only sweeps laterally.
-    protection_radius: 0.08
-    safety_margin: 0.015
-    s_sweep_offset: 0.11
-    s_close_cluster_gap: 0.0  # <=0 uses 2*effective radius + resolution
+    protection_radius: 0.05
+    safety_margin: 0.0
+    s_sweep_offset: 0.05
+    s_close_cluster_gap: 0.0  # <=0 derives a safe close/re-sown grouping gap
     s_first_side: 1           # +1/-1 selects the first bypass side
 
     # Legacy coverage parameters remain accepted by planner_core for offline
     # comparisons, but the ROS node now uses the dual-arm S planner.
     coverage_spacing: 0.06
-    path_resolution: 0.02
+    path_resolution: 0.005
     lateral_work_margin: 0.10
     travel_work_margin: 0.05
     max_grid_cells: 250000
 
-    # Three-dimensional path height follows the 2.5D terrain map.
-    tool_ground_clearance: 0.02
+    # Three-dimensional path height follows a locally fitted 2.5D ground plane.
+    # Signed normal offset: negative is below ground, positive is above.
+    tool_surface_offset: -0.02  # vehicle: cultivate 2 cm below the soil surface
+    height_axis_up_sign: 1      # vehicle camera_init +z points upward
     terrain_search_radius: 0.18
-    terrain_nearest_count: 6
+    terrain_nearest_count: 24
+    terrain_min_neighbors: 3
+    terrain_max_fit_rms: 0.025
+    terrain_max_slope_deg: 35.0
     max_terrain_points: 30000
 
     replan_period_sec: 1.0

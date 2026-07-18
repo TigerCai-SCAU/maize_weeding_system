@@ -26,9 +26,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from .planner_core import (
     PlannerConfig,
-    interpolate_terrain_height,
+    estimate_terrain_surface,
     lateral_travel_height_to_world,
     minimum_seedling_clearance,
+    offset_height_from_terrain,
     plan_dual_arm_s,
     world_to_lateral_travel,
 )
@@ -86,20 +87,24 @@ class SpatialPathPlanner(Node):
         self.declare_parameter("row_cluster_threshold", 0.22)
         self.declare_parameter("plant_spacing_tolerance", 0.35)
         self.declare_parameter("min_plants_per_row", 2)
-        self.declare_parameter("protection_radius", 0.08)
-        self.declare_parameter("safety_margin", 0.015)
+        self.declare_parameter("protection_radius", 0.05)
+        self.declare_parameter("safety_margin", 0.0)
         self.declare_parameter("coverage_spacing", 0.06)
-        self.declare_parameter("path_resolution", 0.02)
+        self.declare_parameter("path_resolution", 0.005)
         self.declare_parameter("lateral_work_margin", 0.10)
         self.declare_parameter("travel_work_margin", 0.05)
         self.declare_parameter("max_grid_cells", 250000)
-        self.declare_parameter("s_sweep_offset", 0.11)
+        self.declare_parameter("s_sweep_offset", 0.05)
         self.declare_parameter("s_close_cluster_gap", 0.0)
         self.declare_parameter("s_first_side", 1)
 
-        self.declare_parameter("tool_ground_clearance", 0.02)
+        self.declare_parameter("tool_surface_offset", 0.02)
+        self.declare_parameter("height_axis_up_sign", 1)
         self.declare_parameter("terrain_search_radius", 0.18)
         self.declare_parameter("terrain_nearest_count", 6)
+        self.declare_parameter("terrain_min_neighbors", 3)
+        self.declare_parameter("terrain_max_fit_rms", 0.025)
+        self.declare_parameter("terrain_max_slope_deg", 35.0)
         self.declare_parameter("max_terrain_points", 30000)
         self.declare_parameter("replan_period_sec", 1.0)
         self.declare_parameter("minimum_map_points", 4)
@@ -179,14 +184,28 @@ class SpatialPathPlanner(Node):
             ),
             s_first_side=int(self.get_parameter("s_first_side").value),
         )
-        self.tool_ground_clearance = float(
-            self.get_parameter("tool_ground_clearance").value
+        self.tool_surface_offset = float(
+            self.get_parameter("tool_surface_offset").value
         )
+        self.height_axis_up_sign = int(
+            self.get_parameter("height_axis_up_sign").value
+        )
+        if self.height_axis_up_sign not in (-1, 1):
+            raise ValueError("height_axis_up_sign must be +1 or -1")
         self.terrain_search_radius = float(
             self.get_parameter("terrain_search_radius").value
         )
         self.terrain_nearest_count = int(
             self.get_parameter("terrain_nearest_count").value
+        )
+        self.terrain_min_neighbors = int(
+            self.get_parameter("terrain_min_neighbors").value
+        )
+        self.terrain_max_fit_rms = float(
+            self.get_parameter("terrain_max_fit_rms").value
+        )
+        self.terrain_max_slope_deg = float(
+            self.get_parameter("terrain_max_slope_deg").value
         )
         self.max_terrain_points = int(
             self.get_parameter("max_terrain_points").value
@@ -372,30 +391,82 @@ class SpatialPathPlanner(Node):
             self.last_planned_signature = signature
             return
 
-        fallback_height = float(np.median(seedlings_xyz[:, self.height_axis]))
         arm_paths_xyz = []
+        terrain_fit_rms_values = []
+        terrain_slope_values = []
+        terrain_support_values = []
+        terrain_failure = None
         for arm_path_lt in result.arm_paths_lt:
             path_xyz = []
             for lateral, travel in arm_path_lt:
-                height = interpolate_terrain_height(
+                surface = estimate_terrain_surface(
                     float(lateral),
                     float(travel),
                     terrain_lth,
                     self.terrain_search_radius,
-                    fallback_height,
                     self.terrain_nearest_count,
+                    self.terrain_min_neighbors,
                 )
+                if surface is None:
+                    terrain_failure = {
+                        "reason": "terrain_support_missing",
+                        "lateral_m": round(float(lateral), 4),
+                        "travel_m": round(float(travel), 4),
+                    }
+                    break
+                slope_deg = math.degrees(
+                    math.atan(
+                        math.hypot(
+                            surface.slope_lateral,
+                            surface.slope_travel,
+                        )
+                    )
+                )
+                if (
+                    surface.rms_error > self.terrain_max_fit_rms
+                    or slope_deg > self.terrain_max_slope_deg
+                ):
+                    terrain_failure = {
+                        "reason": "terrain_fit_rejected",
+                        "lateral_m": round(float(lateral), 4),
+                        "travel_m": round(float(travel), 4),
+                        "fit_rms_m": round(surface.rms_error, 4),
+                        "slope_deg": round(slope_deg, 2),
+                    }
+                    break
+                height = offset_height_from_terrain(
+                    surface,
+                    self.tool_surface_offset,
+                    self.height_axis_up_sign,
+                )
+                terrain_fit_rms_values.append(surface.rms_error)
+                terrain_slope_values.append(slope_deg)
+                terrain_support_values.append(surface.support_count)
                 path_xyz.append(
                     lateral_travel_height_to_world(
                         float(lateral),
                         float(travel),
-                        height + self.tool_ground_clearance,
+                        height,
                         self.lateral_axis,
                         self.travel_axis,
                         self.height_axis,
                     )
                 )
+            if terrain_failure is not None:
+                break
             arm_paths_xyz.append(np.asarray(path_xyz, dtype=np.float64))
+        if terrain_failure is not None:
+            self._publish_empty_plan()
+            self._publish_status(
+                {
+                    "valid": False,
+                    **terrain_failure,
+                    "terrain_point_count": int(len(terrain_lth)),
+                    "terrain_search_radius_m": self.terrain_search_radius,
+                }
+            )
+            self.last_planned_signature = signature
+            return
         clearances = [
             minimum_seedling_clearance(path, result.seedling_lt)
             for path in result.arm_paths_lt
@@ -454,6 +525,22 @@ class SpatialPathPlanner(Node):
                 "legacy_path_alias": "arm_1",
                 "predicted_missing_lt_m": predicted_missing,
                 "terrain_point_count": int(len(terrain_lth)),
+                "tool_surface_offset_m": self.tool_surface_offset,
+                "tool_mode": (
+                    "above_surface"
+                    if self.tool_surface_offset >= 0.0
+                    else "below_surface"
+                ),
+                "height_axis_up_sign": self.height_axis_up_sign,
+                "terrain_fit_max_rms_m": round(
+                    max(terrain_fit_rms_values, default=0.0), 4
+                ),
+                "terrain_max_slope_deg": round(
+                    max(terrain_slope_values, default=0.0), 2
+                ),
+                "terrain_min_support_count": min(
+                    terrain_support_values, default=0
+                ),
                 "source_stamp": (
                     {
                         "sec": int(stamp.sec),

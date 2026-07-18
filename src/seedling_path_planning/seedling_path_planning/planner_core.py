@@ -17,14 +17,14 @@ class PlannerConfig:
     row_cluster_threshold: float = 0.22
     plant_spacing_tolerance: float = 0.35
     min_plants_per_row: int = 2
-    protection_radius: float = 0.08
-    safety_margin: float = 0.015
+    protection_radius: float = 0.05
+    safety_margin: float = 0.0
     coverage_spacing: float = 0.06
-    path_resolution: float = 0.02
+    path_resolution: float = 0.005
     lateral_work_margin: float = 0.10
     travel_work_margin: float = 0.05
     max_grid_cells: int = 250_000
-    s_sweep_offset: float = 0.11
+    s_sweep_offset: float = 0.05
     s_close_cluster_gap: float = 0.0
     s_first_side: int = 1
 
@@ -68,6 +68,15 @@ class DualArmPlanResult:
     obstacle_radius: float
     seedling_lt: np.ndarray
     row_spacing_measured: list[float]
+
+
+@dataclass(frozen=True)
+class TerrainSurfaceEstimate:
+    height: float
+    slope_lateral: float
+    slope_travel: float
+    support_count: int
+    rms_error: float
 
 
 def _robust_line_fit(travel: np.ndarray, lateral: np.ndarray) -> tuple[float, float]:
@@ -178,7 +187,13 @@ def _smooth_path_through_knots(
     knots_lt: np.ndarray,
     travel_values: np.ndarray,
 ) -> np.ndarray:
-    """Cosine-interpolate lateral knots on a strictly forward travel grid."""
+    """Join crop-side targets with smooth, strictly forward half-waves.
+
+    Between two opposite-side seedling targets the cosine midpoint is the
+    average row centre used as the valley anchor by the original row planner.
+    The zero slope at each target also avoids a sharp steering corner beside a
+    crop without adding straight guard plateaus.
+    """
     knots = np.asarray(knots_lt, dtype=np.float64).reshape(-1, 2)
     output = np.empty((len(travel_values), 2), dtype=np.float64)
     output[:, 1] = travel_values
@@ -215,42 +230,51 @@ def _row_s_path(
     if len(row_points) < 2:
         raise ValueError(f"row {row.index} has fewer than two seedlings")
 
-    side = 1 if config.s_first_side >= 0 else -1
     cluster_gap = config.s_close_cluster_gap
     if cluster_gap <= 0.0:
-        cluster_gap = 2.0 * config.obstacle_radius + config.path_resolution
-    signs = [side]
-    for previous, current in zip(row_points, row_points[1:]):
-        if float(current[1] - previous[1]) > cluster_gap:
-            side *= -1
-        signs.append(side)
+        cluster_gap = max(
+            3.0 * config.obstacle_radius,
+            config.expected_plant_spacing
+            * (1.0 - config.plant_spacing_tolerance),
+        )
 
     offset = max(config.s_sweep_offset, config.obstacle_radius)
+    groups: list[np.ndarray] = []
+    group_start = 0
+    for point_index in range(1, len(row_points)):
+        if (
+            float(row_points[point_index, 1] - row_points[point_index - 1, 1])
+            > cluster_gap
+        ):
+            groups.append(row_points[group_start:point_index])
+            group_start = point_index
+    groups.append(row_points[group_start:])
+
+    side = 1 if config.s_first_side >= 0 else -1
+    targets: list[tuple[float, float]] = []
+    signs: list[int] = []
+    for group in groups:
+        # Close/re-sown seedlings may have overlapping protection circles.
+        # Bypass their union from one side instead of attempting an unsafe
+        # side change between individual stems.
+        if side > 0:
+            group_target_lateral = float(np.max(group[:, 0]) + offset)
+        else:
+            group_target_lateral = float(np.min(group[:, 0]) - offset)
+        targets.extend(
+            (group_target_lateral, float(point[1]))
+            for point in group
+        )
+        signs.extend([side] * len(group))
+        side *= -1
+
     knots = [
         (
             row.lateral_at(float(travel_values[0])) + signs[0] * offset,
             float(travel_values[0]),
         )
     ]
-    targets = [
-        (float(point[0]) + sign * offset, float(point[1]))
-        for point, sign in zip(row_points, signs)
-    ]
-    knots.append(targets[0])
-    transition_guard = config.obstacle_radius + config.path_resolution
-    for point_index in range(1, len(targets)):
-        previous_target = targets[point_index - 1]
-        current_target = targets[point_index]
-        if signs[point_index] != signs[point_index - 1]:
-            gap = current_target[1] - previous_target[1]
-            guard = min(transition_guard, 0.45 * gap)
-            knots.append(
-                (previous_target[0], previous_target[1] + guard)
-            )
-            knots.append(
-                (current_target[0], current_target[1] - guard)
-            )
-        knots.append(current_target)
+    knots.extend(targets)
     knots.append(
         (
             row.lateral_at(float(travel_values[-1])) + signs[-1] * offset,
@@ -293,9 +317,16 @@ def plan_dual_arm_s(
         for row in assigned_rows
     ]
 
+    # A sampled polyline chord can cut a few micrometres inside the exact
+    # cosine curve. This tolerance is numerical only; it does not inflate the
+    # configured crop protection radius.
+    clearance_tolerance = max(
+        1e-6,
+        min(1e-4, 0.02 * config.path_resolution),
+    )
     for arm_index, path in enumerate(arm_paths, start=1):
         clearance = minimum_seedling_clearance(path, seedlings)
-        if clearance + 1e-9 < config.obstacle_radius:
+        if clearance + clearance_tolerance < config.obstacle_radius:
             raise ValueError(
                 f"arm {arm_index} S path clearance {clearance:.3f} m is below "
                 f"{config.obstacle_radius:.3f} m"
@@ -676,6 +707,111 @@ def lateral_travel_height_to_world(
     world[travel_axis] = travel
     world[height_axis] = height
     return world
+
+
+def estimate_terrain_surface(
+    lateral: float,
+    travel: float,
+    terrain_lth: np.ndarray,
+    search_radius: float,
+    nearest_count: int = 12,
+    min_neighbors: int = 3,
+) -> TerrainSurfaceEstimate | None:
+    """Fit a local 2.5D ground plane around one tool-path point.
+
+    The fitted surface is ``height = a*dl + b*dt + c`` in coordinates centred
+    at the query. Returning ``None`` instead of a guessed height lets the ROS
+    node inhibit the tool whenever the terrain map has a local coverage gap.
+    """
+    terrain = np.asarray(terrain_lth, dtype=np.float64).reshape(-1, 3)
+    terrain = terrain[np.isfinite(terrain).all(axis=1)]
+    if terrain.size == 0 or search_radius <= 0.0:
+        return None
+    distance_sq = (
+        (terrain[:, 0] - lateral) ** 2
+        + (terrain[:, 1] - travel) ** 2
+    )
+    mask = distance_sq <= search_radius * search_radius
+    if int(np.count_nonzero(mask)) < max(3, min_neighbors):
+        return None
+    candidates = terrain[mask]
+    candidate_distance_sq = distance_sq[mask]
+    order = np.argsort(candidate_distance_sq)[
+        : max(3, min(nearest_count, len(candidates)))
+    ]
+    selected = candidates[order]
+    selected_distance_sq = candidate_distance_sq[order]
+    design = np.column_stack(
+        (
+            selected[:, 0] - lateral,
+            selected[:, 1] - travel,
+            np.ones(len(selected)),
+        )
+    )
+    distance_weights = 1.0 / np.maximum(
+        selected_distance_sq,
+        max(1e-6, (0.15 * search_radius) ** 2),
+    )
+    weights = distance_weights.copy()
+    coefficients = np.zeros(3, dtype=np.float64)
+    rank = 0
+    for _ in range(4):
+        weight_root = np.sqrt(weights)
+        weighted_design = design * weight_root[:, None]
+        weighted_height = selected[:, 2] * weight_root
+        coefficients, _residuals, rank, _singular = np.linalg.lstsq(
+            weighted_design,
+            weighted_height,
+            rcond=None,
+        )
+        if rank < 3 or not np.isfinite(coefficients).all():
+            return None
+        residual = selected[:, 2] - design @ coefficients
+        residual_median = float(np.median(residual))
+        mad = float(np.median(np.abs(residual - residual_median)))
+        robust_scale = max(0.001, 1.4826 * mad)
+        normalized = np.abs(residual - residual_median) / (
+            2.5 * robust_scale
+        )
+        robust_weights = np.ones_like(normalized)
+        outlier_mask = normalized > 1.0
+        robust_weights[outlier_mask] = 1.0 / normalized[outlier_mask]
+        weights = distance_weights * robust_weights
+    fitted = design @ coefficients
+    rms_error = float(
+        np.sqrt(np.average((selected[:, 2] - fitted) ** 2, weights=weights))
+    )
+    return TerrainSurfaceEstimate(
+        height=float(coefficients[2]),
+        slope_lateral=float(coefficients[0]),
+        slope_travel=float(coefficients[1]),
+        support_count=int(len(selected)),
+        rms_error=rms_error,
+    )
+
+
+def offset_height_from_terrain(
+    surface: TerrainSurfaceEstimate,
+    surface_offset: float,
+    height_axis_up_sign: int,
+) -> float:
+    """Apply a signed normal offset while keeping lateral/travel fixed.
+
+    ``surface_offset`` is positive above the ground and negative below it.
+    The slope scale converts the requested normal distance into a height-axis
+    displacement, so a 2 cm setting remains 2 cm on sloped terrain.
+    """
+    if height_axis_up_sign not in (-1, 1):
+        raise ValueError("height_axis_up_sign must be +1 or -1")
+    slope_scale = math.sqrt(
+        1.0
+        + surface.slope_lateral * surface.slope_lateral
+        + surface.slope_travel * surface.slope_travel
+    )
+    return float(
+        surface.height
+        + height_axis_up_sign * surface_offset * slope_scale
+    )
 
 
 def interpolate_terrain_height(

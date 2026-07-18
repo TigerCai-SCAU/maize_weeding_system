@@ -3,9 +3,11 @@ import numpy as np
 from seedling_path_planning.planner_core import (
     PlannerConfig,
     analyze_rows,
+    estimate_terrain_surface,
     interpolate_terrain_height,
     lateral_travel_height_to_world,
     minimum_seedling_clearance,
+    offset_height_from_terrain,
     plan_dual_arm_s,
     plan_coverage,
 )
@@ -109,6 +111,30 @@ def test_close_resown_pair_stays_on_same_bypass_side():
     assert offsets[0] * offsets[1] > 0.0
 
 
+def test_s_path_crosses_row_centre_between_alternating_seedlings():
+    config = PlannerConfig(
+        row_cluster_threshold=0.0,
+        protection_radius=0.05,
+        safety_margin=0.0,
+        path_resolution=0.001,
+        travel_work_margin=0.12,
+        s_sweep_offset=0.05,
+    )
+    seedlings = irregular_two_rows()
+    result = plan_dual_arm_s(seedlings, config)
+    left_path = result.arm_paths_lt[0]
+    left_points = seedlings[result.rows[0].point_indices]
+    left_points = left_points[np.argsort(left_points[:, 1])]
+
+    first, second = left_points[:2]
+    midpoint_travel = 0.5 * (first[1] + second[1])
+    midpoint_lateral = 0.5 * (first[0] + second[0])
+    path_index = int(
+        np.argmin(np.abs(left_path[:, 1] - midpoint_travel))
+    )
+    assert abs(left_path[path_index, 0] - midpoint_lateral) < 0.001
+
+
 def test_missing_predictions_are_diagnostics_not_obstacles():
     config = PlannerConfig(row_cluster_threshold=0.0)
     seedlings = irregular_two_rows()
@@ -150,3 +176,76 @@ def test_terrain_height_uses_nearby_points_and_safe_fallback():
         )
         == 0.5
     )
+
+
+def test_terrain_surface_offset_distinguishes_vehicle_depth_and_bench_height():
+    lateral = np.asarray([-0.10, 0.00, 0.10, -0.10, 0.10])
+    travel = np.asarray([-0.10, 0.00, 0.10, 0.10, -0.10])
+    height = 1.0 + 0.10 * lateral + 0.20 * travel
+    terrain = np.column_stack((lateral, travel, height))
+    surface = estimate_terrain_surface(
+        0.0,
+        0.0,
+        terrain,
+        search_radius=0.20,
+        nearest_count=5,
+        min_neighbors=3,
+    )
+    assert surface is not None
+    assert np.isclose(surface.height, 1.0)
+    assert np.isclose(surface.slope_lateral, 0.10)
+    assert np.isclose(surface.slope_travel, 0.20)
+
+    normal_scale = np.sqrt(1.0 + 0.10**2 + 0.20**2)
+    vehicle_height = offset_height_from_terrain(
+        surface, surface_offset=-0.02, height_axis_up_sign=1
+    )
+    bench_height = offset_height_from_terrain(
+        surface, surface_offset=0.02, height_axis_up_sign=-1
+    )
+    expected = 1.0 - 0.02 * normal_scale
+    assert np.isclose(vehicle_height, expected)
+    assert np.isclose(bench_height, expected)
+
+
+def test_terrain_surface_rejects_local_coverage_without_plane_support():
+    terrain = np.asarray(
+        [
+            [0.0, 0.0, 1.0],
+            [0.1, 0.0, 1.0],
+        ]
+    )
+    assert (
+        estimate_terrain_surface(
+            0.0,
+            0.0,
+            terrain,
+            search_radius=0.20,
+            min_neighbors=3,
+        )
+        is None
+    )
+
+
+def test_terrain_surface_fit_suppresses_one_height_outlier():
+    lateral, travel = np.meshgrid(
+        np.linspace(-0.10, 0.10, 5),
+        np.linspace(-0.10, 0.10, 5),
+    )
+    height = 1.0 + 0.05 * lateral - 0.02 * travel
+    height[2, 2] += 0.10
+    terrain = np.column_stack(
+        (lateral.reshape(-1), travel.reshape(-1), height.reshape(-1))
+    )
+    surface = estimate_terrain_surface(
+        0.0,
+        0.0,
+        terrain,
+        search_radius=0.18,
+        nearest_count=24,
+        min_neighbors=3,
+    )
+    assert surface is not None
+    assert abs(surface.height - 1.0) < 0.005
+    assert abs(surface.slope_lateral - 0.05) < 0.02
+    assert abs(surface.slope_travel + 0.02) < 0.02
