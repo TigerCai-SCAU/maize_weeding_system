@@ -954,10 +954,13 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
 
   if (last_timestamp_imu > 0.0 && timestamp > last_timestamp_imu + 0.2)
   {
-    RCLCPP_WARN(this->node->get_logger(), "imu time stamp Jumps %0.4lf seconds \n", timestamp - last_timestamp_imu);
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-    return;
+    // Match upstream FAST-LIVO2 behavior: an isolated transport gap must not
+    // permanently lock the callback to the old timestamp. Keep the warning,
+    // then accept this sample so last_timestamp_imu advances normally.
+    RCLCPP_WARN(
+      this->node->get_logger(),
+      "imu time stamp gap %0.4lf seconds; accepting current sample\n",
+      timestamp - last_timestamp_imu);
   }
 
   last_timestamp_imu = timestamp;
