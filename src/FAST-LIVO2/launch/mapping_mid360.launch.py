@@ -60,8 +60,10 @@ def generate_launch_description():
         output="screen",
     )
 
+    # The ROS2 camera loader waits only briefly for the remote parameter
+    # service. Five seconds makes parameter discovery deterministic on Jetson.
     delayed_fast_livo = TimerAction(
-        period=2.0,
+        period=5.0,
         actions=[fast_livo_node],
     )
 

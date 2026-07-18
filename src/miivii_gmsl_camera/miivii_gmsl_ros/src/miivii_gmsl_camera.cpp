@@ -55,6 +55,8 @@ namespace miivii_gmsl
     declare_parameter<int>("async_freq", 0);
     declare_parameter<int>("sync_trigger", 0xff);
     declare_parameter<int>("async_trigger", 0);
+    declare_parameter<bool>("allow_system_time_fallback", false);
+    declare_parameter<bool>("image_best_effort", false);
     declare_parameter<std::vector<int64_t>>("async_angle", std::vector<int64_t>());
 
     this->camera_num = 8;
@@ -158,7 +160,20 @@ namespace miivii_gmsl
       bool active = get_parameter(dev_node + ".active").as_bool();
       if (active)
       {
-        image_publisher_[active_camera_num] = this->create_publisher<sensor_msgs::msg::Image>("miivii_gmsl/image" + std::to_string(i), 10);
+        const bool image_best_effort =
+            this->get_parameter("image_best_effort").as_bool();
+        rclcpp::QoS image_qos(rclcpp::KeepLast(image_best_effort ? 2 : 10));
+        if (image_best_effort)
+        {
+          image_qos.best_effort();
+        }
+        else
+        {
+          image_qos.reliable();
+        }
+        image_publisher_[active_camera_num] =
+            this->create_publisher<sensor_msgs::msg::Image>(
+                "miivii_gmsl/image" + std::to_string(i), image_qos);
         std::string camera_info_topic = "miivii_gmsl/camera_info" + std::to_string(i);
         camera_info_publisher_[active_camera_num] = this->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10);
         ctx[active_camera_num].dev_node = get_parameter(dev_node + ".node_name").as_string();
@@ -295,17 +310,33 @@ get_ok_count++;
 
     if (publish_timestamp == 0)
     {
-      zero_stamp_drop_count++;
-      RCLCPP_WARN_THROTTLE(
-          this->get_logger(),
-          *this->get_clock(),
-          1000,
-          "[CAMERA_DROP_ZERO_STAMP] drop image because timestamp is 0, "
-          "drop_count=%llu, getimage_timestamp=%llu, got_gmsl_timestamp=%d",
-          static_cast<unsigned long long>(zero_stamp_drop_count),
-          static_cast<unsigned long long>(timestamp_from_getimage),
-          static_cast<int>(got_gmsl_timestamp));
-      return;
+      const bool allow_system_time_fallback =
+          this->get_parameter("allow_system_time_fallback").as_bool();
+      if (allow_system_time_fallback)
+      {
+        publish_timestamp =
+            static_cast<uint64_t>(this->get_clock()->now().nanoseconds());
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "[CAMERA_SYSTEM_TIME_FALLBACK] GMSL timestamp unavailable; "
+            "using ROS system time for training-data capture only");
+      }
+      else
+      {
+        zero_stamp_drop_count++;
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            1000,
+            "[CAMERA_DROP_ZERO_STAMP] drop image because timestamp is 0, "
+            "drop_count=%llu, getimage_timestamp=%llu, got_gmsl_timestamp=%d",
+            static_cast<unsigned long long>(zero_stamp_drop_count),
+            static_cast<unsigned long long>(timestamp_from_getimage),
+            static_cast<int>(got_gmsl_timestamp));
+        return;
+      }
     }
 
     if (last_published_stamp_ns != 0 && publish_timestamp == last_published_stamp_ns)

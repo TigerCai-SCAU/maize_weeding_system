@@ -113,8 +113,8 @@ T getRemoteParam(const rclcpp::Node::SharedPtr &nh, const std::string& remote_no
     // Use SyncParametersClient for high performance cross-node access
     try {
         auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(nh, remote_node_name);
-        // Wait briefly for the service to be available
-        if (parameters_client->wait_for_service(std::chrono::milliseconds(100))) {
+        // Allow DDS discovery to complete on the Jetson before using defaults.
+        if (parameters_client->wait_for_service(std::chrono::seconds(3))) {
             auto values = parameters_client->get_parameters({param_name});
             if (!values.empty() && values[0].get_type() != rclcpp::ParameterType::PARAMETER_NOT_SET) {
                 return values[0].get_value<T>();
