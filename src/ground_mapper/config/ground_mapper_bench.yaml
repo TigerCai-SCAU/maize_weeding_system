@@ -1,0 +1,88 @@
+ground_mapper_node:
+  ros__parameters:
+    # Bench-only kinematic reinterpretation: /cloud_registered is stationary
+    # in camera_init, but is treated as the initial local scan and translated
+    # by wheel-driven virtual odometry to emulate a moving sensor.
+    cloud_topic: /cloud_registered
+    cloud_frame_mode: body
+    odom_topic: /bench/aft_mapped_to_init
+    map_frame: camera_init
+    body_frame: camera_init
+
+    ground_points_topic: /ground/points
+    non_ground_points_topic: /ground/non_ground_points
+    elevation_points_topic: /ground/elevation_points
+    global_elevation_points_topic: /ground/global_elevation_points
+    elevation_markers_topic: /ground/elevation_markers
+    plane_topic: /ground/plane
+    sensor_height_topic: /ground/sensor_height
+    status_topic: /ground/status
+
+    vertical_axis: 0
+    lateral_axis: 1
+    forward_axis: 2
+    forward_sign: -1.0
+    # The conveyor is on body +x. With d kept positive, its plane normal is
+    # therefore body -x. Reject the larger parallel surface behind the sensor.
+    ground_normal_sign: -1.0
+
+    lateral_min_m: -1.5
+    lateral_max_m: 1.5
+    forward_min_m: -1.0
+    forward_max_m: 5.0
+
+    window_sec: 1.5
+    publish_rate_hz: 1.0
+    input_voxel_size_m: 0.05
+    max_points_per_scan: 12000
+    max_rolling_points: 50000
+    odom_cache_size: 300
+    max_cloud_odom_dt_sec: 0.30
+
+    ransac_iterations: 20
+    ransac_sample_points: 2000
+    ransac_distance_m: 0.08
+    max_normal_angle_deg: 35.0
+    min_plane_inliers: 250
+    min_plane_inlier_ratio: 0.05
+    max_plane_rmse_m: 0.12
+    min_sensor_height_m: 0.25
+    max_sensor_height_m: 3.0
+    max_height_jump_m: 0.20
+    plane_smoothing_alpha: 0.20
+    plane_timeout_sec: 3.0
+
+    ground_below_margin_m: 0.10
+    ground_above_margin_m: 0.06
+    non_ground_min_height_m: 0.06
+    max_object_height_m: 0.60
+
+    terrain_coarse_below_m: 0.35
+    terrain_coarse_above_m: 0.30
+    terrain_height_quantile: 0.20
+    terrain_min_points_per_cell: 2
+    terrain_max_neighbor_jump_m: 0.12
+    terrain_min_neighbor_cells: 2
+    terrain_min_fill_neighbors: 2
+
+    grid_resolution_m: 0.05
+    max_fill_distance_m: 0.15
+    publish_full_plane_roi: false
+    max_dense_cells: 12000
+
+    # A five-metre conveyor run must remain available for terrain-ray lookup.
+    map_mode: global
+    map_resolution_m: 0.05
+    map_keep_behind_m: 5.0
+    map_keep_ahead_m: 5.0
+    map_max_cells: 300000
+    map_height_smoothing_alpha: 0.20
+    map_publish_rate_hz: 1.0
+
+    save_map_path: /tmp/ground_bench_map.csv
+    save_map_on_shutdown: false
+
+    publish_non_ground: true
+    publish_markers: false
+    marker_max_points: 5000
+    log_debug: true

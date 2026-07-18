@@ -30,6 +30,9 @@ from .yolo_sep_localizer import YoloSepLocalizer, SepDetection, image_msg_to_num
 
 
 class ColorSepLocalizer(YoloSepLocalizer):
+    def uses_yolo_model(self) -> bool:
+        return False
+
     def __init__(self) -> None:
         # 这里故意沿用 yolo_sep_localizer 作为节点名，
         # 这样可以直接复用 seedling_pipeline.yaml 里面 yolo_sep_localizer: 下的参数。

@@ -126,6 +126,9 @@ def image_msg_to_numpy(msg: Image) -> np.ndarray:
 
 
 class YoloSepLocalizer(Node):
+    def uses_yolo_model(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__("yolo_sep_localizer")
 
@@ -354,7 +357,11 @@ class YoloSepLocalizer(Node):
 
         self.model = None
         model_path = str(self.get_parameter("model_path").value)
-        if model_path:
+        if not self.uses_yolo_model():
+            self.get_logger().info(
+                "Detector mode does not use YOLO; model loading skipped."
+            )
+        elif model_path:
             try:
                 from ultralytics import YOLO  # type: ignore
 

@@ -343,7 +343,8 @@ class GroundMapper(Node):
             f"odom={self.odom_topic}, "
             f"body_axes=(vertical={self.vertical_axis}, "
             f"lateral={self.lateral_axis}, forward={self.forward_axis}, "
-            f"forward_sign={self.forward_sign:+.0f}), "
+            f"forward_sign={self.forward_sign:+.0f}, "
+            f"ground_normal_sign={self.ground_normal_sign:+.0f}), "
             f"y=[{self.lateral_min_m:.2f},{self.lateral_max_m:.2f}] m, "
             f"map_mode={self.map_mode}"
         )
@@ -369,6 +370,9 @@ class GroundMapper(Node):
             "lateral_axis": 1,
             "forward_axis": 2,
             "forward_sign": -1.0,
+            # 0 accepts either plane orientation. +/-1 constrains the fitted
+            # normal on vertical_axis after it is oriented to keep d positive.
+            "ground_normal_sign": 0.0,
             "lateral_min_m": -1.5,
             "lateral_max_m": 1.5,
             "forward_min_m": -1.0,
@@ -514,6 +518,10 @@ class GroundMapper(Node):
             )
         if abs(abs(self.forward_sign) - 1.0) > 1e-6:
             raise ValueError("forward_sign must be +1.0 or -1.0")
+        if self.ground_normal_sign not in (-1.0, 0.0, 1.0):
+            raise ValueError(
+                "ground_normal_sign must be -1.0, 0.0, or +1.0"
+            )
         if self.lateral_min_m >= self.lateral_max_m:
             raise ValueError("lateral_min_m must be smaller than lateral_max_m")
         if self.forward_min_m >= self.forward_max_m:
@@ -736,6 +744,12 @@ class GroundMapper(Node):
             if d < 0.0:
                 normal = -normal
                 d = -d
+            if (
+                self.ground_normal_sign != 0.0
+                and normal[self.vertical_axis] * self.ground_normal_sign
+                < min_vertical_component
+            ):
+                continue
             if not (
                 self.min_sensor_height_m
                 <= d
@@ -775,6 +789,12 @@ class GroundMapper(Node):
         if d < 0.0:
             normal = -normal
             d = -d
+        if (
+            self.ground_normal_sign != 0.0
+            and normal[self.vertical_axis] * self.ground_normal_sign
+            < min_vertical_component
+        ):
+            return None
         if not (
             self.min_sensor_height_m
             <= d

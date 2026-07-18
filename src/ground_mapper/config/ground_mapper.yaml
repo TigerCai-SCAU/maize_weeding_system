@@ -18,13 +18,16 @@ ground_mapper_node:
     status_topic: /ground/status
 
     # Actual MID360 installation on the vehicle:
-    #   body x: vertical (the sign is detected from the fitted plane)
+    #   body x: vertical
     #   body y: lateral
     #   body -z: vehicle forward
     vertical_axis: 0
     lateral_axis: 1
     forward_axis: 2
     forward_sign: -1.0
+    # 0.0 keeps automatic sign selection for vehicle data. Set to +/-1.0 only
+    # when parallel planes can be seen and the ground-facing direction is known.
+    ground_normal_sign: 0.0
 
     # Active work strip. Keep the full 360 degree cloud inside FAST-LIVO; this
     # ROI is applied only to the downstream ground-map copy.

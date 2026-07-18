@@ -1,0 +1,128 @@
+yolo_sep_localizer:
+  ros__parameters:
+    image_topic: /miivii_gmsl/image3
+    odom_topic: /bench/aft_mapped_to_init
+    terrain_topic: /ground/global_elevation_points
+    world_frame: camera_init
+    observation_topic: /seedling/observation_point_map
+    marker_topic: /seedling/current_observation_markers
+
+    model_path: "/home/nvidia/maize_models/maize_pose_best.pt"
+    device: "0"
+    imgsz: 960
+    det_conf: 0.35
+    kp_conf: 0.30
+    keypoint_index: 0
+    class_id: 0
+    max_detections: 50
+    nms_sep_px: 12.0
+
+    # Wheel odometry and camera images use the same host clock on the bench;
+    # the outdoor FAST-LIVO +0.10 second offset remains in the vehicle YAML.
+    image_time_offset_sec: 0.0
+    max_odom_bracket_gap_sec: 0.10
+    pending_image_queue_size: 3
+    cache_size: 200
+
+    max_terrain_age_sec: 3.0
+    terrain_resolution_m: 0.05
+    terrain_vertical_axis: 0
+    terrain_horizontal_axes: [1, 2]
+    terrain_lookup_radius_m: 0.08
+    terrain_min_neighbors: 1
+
+    ray_min_range_m: 0.10
+    ray_max_range_m: 8.0
+    ray_step_m: 0.025
+    ray_height_tolerance_m: 0.02
+    ray_max_valid_gap_m: 0.15
+    ray_min_vertical_component: 0.02
+
+    cam_fx: 2067.847367
+    cam_fy: 2069.439913
+    cam_cx: 1439.099334
+    cam_cy: 902.294703
+
+    use_distortion: true
+    dist_k1: -0.554065
+    dist_k2: 0.220066
+    dist_p1: 0.001350
+    dist_p2: 0.001332
+    dist_k3: 0.0
+    intrinsic_scale: 1.0
+
+    Rcl: [-0.011051, -0.999830,  0.014773,
+           0.522598, -0.018371, -0.852382,
+           0.852508, -0.001699,  0.522712]
+    Pcl: [-0.012874, -0.114651, 0.012899]
+
+    extR: [1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0]
+    extT: [-0.011, -0.02329, 0.04412]
+
+    orange_h_low: 5
+    orange_h_high: 25
+    orange_s_low: 120
+    orange_v_low: 120
+    color_min_area: 1500
+    color_max_area: 100000
+    color_min_fill_ratio: 0.70
+    color_point_v_ratio: 0.88
+    color_morph_kernel: 9
+    color_process_scale: 0.5
+    color_debug_log_every: 30
+
+    publish_debug_mask: true
+    debug_mask_topic: /seedling/orange_mask
+    publish_projection_debug: true
+    projection_debug_topic: /seedling/projection_debug
+    projection_debug_every: 3
+    projection_debug_max_points: 1500
+
+seedling_mapper:
+  ros__parameters:
+    observation_topic: /seedling/observation_point_map
+    marker_topic: /seedling/map_markers
+    map_points_topic: /seedling/map_points
+    csv_path: /tmp/seedling_map_bench_confirmed.csv
+    world_frame: camera_init
+
+    gate_xy: 0.12
+    gate_z: 0.25
+    confirm_hits: 3
+    min_update_dt: 0.20
+    position_alpha: 0.15
+    publish_all_landmarks: false
+    map_points_confirmed_only: true
+    save_every_update: true
+    same_stamp_duplicate_policy: skip
+    max_same_stamp_history: 20
+    tentative_timeout_sec: 10.0
+
+odom_tf_broadcaster:
+  ros__parameters:
+    odom_topic: /bench/aft_mapped_to_init
+    parent_frame: camera_init
+    child_frame: body
+
+rolling_submap_builder:
+  ros__parameters:
+    input_cloud_topic: /cloud_registered
+    odom_topic: /bench/aft_mapped_to_init
+    output_cloud_topic: /seedling/local_submap_body
+    world_frame: camera_init
+    body_frame: body
+
+    window_sec: 1.0
+    publish_rate_hz: 10.0
+    voxel_size_m: 0.02
+    forward_m: 5.0
+    backward_m: 2.0
+    lateral_half_width_m: 1.5
+    below_m: 1.0
+    above_m: 1.5
+    crop_margin_m: 1.0
+    cloud_stride: 1
+    max_points: 60000
+    min_points: 100
