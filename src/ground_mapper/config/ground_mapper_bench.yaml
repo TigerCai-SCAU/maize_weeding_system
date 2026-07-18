@@ -39,11 +39,17 @@ ground_mapper_node:
     odom_cache_size: 300
     max_cloud_odom_dt_sec: 0.30
 
-    ransac_iterations: 20
+    # The conveyor plane occupies about 25-30% of a clean bench ROI.  One
+    # hundred three-point trials reliably reacquire it without starving cloud
+    # callbacks in this Python node.
+    ransac_iterations: 100
     ransac_sample_points: 2000
     ransac_distance_m: 0.08
     max_normal_angle_deg: 35.0
-    min_plane_inliers: 250
+    # During belt motion the 1.5 s rolling window can contain only two usable
+    # scans (roughly 250-750 ROI points).  Keep an absolute support floor while
+    # allowing the ratio/RMSE/normal/height gates below to judge those frames.
+    min_plane_inliers: 60
     min_plane_inlier_ratio: 0.05
     max_plane_rmse_m: 0.12
     min_sensor_height_m: 0.25
