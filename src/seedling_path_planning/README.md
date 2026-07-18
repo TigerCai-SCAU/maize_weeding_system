@@ -7,9 +7,12 @@ This ROS 2 package consumes the existing fused seedling map and 2.5D terrain:
 
 It publishes:
 
-- `/weeding/tool_path` (`nav_msgs/Path`): collision-checked 3D tool path
-- `/weeding/work_points` (`geometry_msgs/PoseArray`): the same path for
-  controller adapters
+- `/weeding/arm_1/tool_path` and `/weeding/arm_2/tool_path`
+  (`nav_msgs/Path`): synchronized, forward-only 3D S paths, one row per arm
+- `/weeding/arm_1/work_points` and `/weeding/arm_2/work_points`
+  (`geometry_msgs/PoseArray`): the same paths for controller adapters
+- `/weeding/tool_path` and `/weeding/work_points`: compatibility aliases for
+  arm 1; new controller code must use the explicit per-arm topics
 - `/weeding/path_markers` (`visualization_msgs/MarkerArray`): protection
   zones, estimated rows and path
 - `/weeding/plan_status` (`std_msgs/String`): JSON diagnostics
@@ -22,11 +25,17 @@ Planting standards are used as approximate priors:
 - expected plant spacing, normally 0.20 m
 - crop protection radius, normally 0.08 m
 
-The planner never creates synthetic crop obstacles. Missing sowing therefore
-leaves workable soil; close/re-sown seedlings produce separate overlapping
-protection zones. A lawnmower coverage path is generated over the mapped
-working window and A* connectors route around the union of all protection
-zones. Path height is interpolated from the terrain map.
+The planner never creates synthetic crop obstacles. Predicted missing slots
+are diagnostics only. Missing sowing therefore leaves workable soil, while
+close/re-sown seedlings retain separate measured positions and protection
+zones.
+
+The vehicle or conveyor supplies forward progress from the wheel encoder.
+Each arm is assigned one measured row and sweeps laterally around its own
+seedlings. Plants whose protection zones nearly touch are treated as a cluster
+and passed on the same side; side changes occur in the safe gap between
+clusters. Both paths use the same strictly increasing travel grid. Path height
+is interpolated independently from the 2.5D terrain map.
 
 The vehicle config uses `x/y/z = travel/lateral/height`. The bench config uses
 `z/y/x = travel/lateral/height`.

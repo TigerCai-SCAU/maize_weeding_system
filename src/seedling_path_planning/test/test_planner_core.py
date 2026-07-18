@@ -6,6 +6,7 @@ from seedling_path_planning.planner_core import (
     interpolate_terrain_height,
     lateral_travel_height_to_world,
     minimum_seedling_clearance,
+    plan_dual_arm_s,
     plan_coverage,
 )
 
@@ -60,6 +61,63 @@ def test_coverage_path_stays_outside_effective_protection_radius():
     clearance = minimum_seedling_clearance(result.path_lt, result.seedling_lt)
     assert len(result.path_lt) > 10
     assert clearance + 1e-9 >= config.obstacle_radius
+
+
+def test_dual_arm_s_paths_are_forward_only_and_one_per_row():
+    config = PlannerConfig(
+        expected_row_spacing=0.55,
+        expected_plant_spacing=0.20,
+        row_cluster_threshold=0.0,
+        protection_radius=0.08,
+        safety_margin=0.015,
+        path_resolution=0.01,
+        travel_work_margin=0.12,
+        s_sweep_offset=0.11,
+    )
+    result = plan_dual_arm_s(irregular_two_rows(), config)
+    assert len(result.rows) == 2
+    assert len(result.arm_paths_lt) == 2
+    for path in result.arm_paths_lt:
+        assert len(path) > 10
+        assert np.all(np.diff(path[:, 1]) > 0.0)
+        assert (
+            minimum_seedling_clearance(path, result.seedling_lt) + 1e-9
+            >= config.obstacle_radius
+        )
+    assert np.median(result.arm_paths_lt[0][:, 0]) < 0.0
+    assert np.median(result.arm_paths_lt[1][:, 0]) > 0.0
+
+
+def test_close_resown_pair_stays_on_same_bypass_side():
+    config = PlannerConfig(
+        row_cluster_threshold=0.0,
+        path_resolution=0.005,
+        travel_work_margin=0.12,
+        s_sweep_offset=0.11,
+    )
+    seedlings = irregular_two_rows()
+    result = plan_dual_arm_s(seedlings, config)
+    right_path = result.arm_paths_lt[1]
+    right_row = result.rows[1]
+    close_points = seedlings[right_row.point_indices]
+    close_points = close_points[np.argsort(close_points[:, 1])]
+    pair = close_points[1:3]
+    offsets = []
+    for lateral, travel in pair:
+        path_index = int(np.argmin(np.abs(right_path[:, 1] - travel)))
+        offsets.append(right_path[path_index, 0] - lateral)
+    assert offsets[0] * offsets[1] > 0.0
+
+
+def test_missing_predictions_are_diagnostics_not_obstacles():
+    config = PlannerConfig(row_cluster_threshold=0.0)
+    seedlings = irregular_two_rows()
+    result = plan_dual_arm_s(seedlings, config)
+    predicted = [
+        point for row in result.rows for point in row.predicted_missing_lt
+    ]
+    assert predicted
+    assert result.seedling_lt.shape == seedlings.shape
 
 
 def test_axis_mapping_supports_bench_travel_z_height_x():

@@ -4,6 +4,10 @@ spatial_path_planner:
     terrain_topic: /ground/global_elevation_points
     path_topic: /weeding/tool_path
     work_points_topic: /weeding/work_points
+    arm_1_path_topic: /weeding/arm_1/tool_path
+    arm_1_work_points_topic: /weeding/arm_1/work_points
+    arm_2_path_topic: /weeding/arm_2/tool_path
+    arm_2_work_points_topic: /weeding/arm_2/work_points
     marker_topic: /weeding/path_markers
     status_topic: /weeding/plan_status
     world_frame: camera_init
@@ -21,6 +25,9 @@ spatial_path_planner:
 
     protection_radius: 0.08
     safety_margin: 0.015
+    s_sweep_offset: 0.11
+    s_close_cluster_gap: 0.0
+    s_first_side: 1
     coverage_spacing: 0.06
     path_resolution: 0.02
     lateral_work_margin: 0.10

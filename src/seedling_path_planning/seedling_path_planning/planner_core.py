@@ -24,6 +24,9 @@ class PlannerConfig:
     lateral_work_margin: float = 0.10
     travel_work_margin: float = 0.05
     max_grid_cells: int = 250_000
+    s_sweep_offset: float = 0.11
+    s_close_cluster_gap: float = 0.0
+    s_first_side: int = 1
 
     @property
     def obstacle_radius(self) -> float:
@@ -41,6 +44,7 @@ class RowModel:
     missing_slots: int = 0
     close_pairs: int = 0
     spacings: list[float] = field(default_factory=list)
+    predicted_missing_lt: list[tuple[float, float]] = field(default_factory=list)
 
     def lateral_at(self, travel: float) -> float:
         return self.slope * travel + self.intercept
@@ -50,6 +54,16 @@ class RowModel:
 class PlanResult:
     rows: list[RowModel]
     path_lt: np.ndarray
+    bounds: tuple[float, float, float, float]
+    obstacle_radius: float
+    seedling_lt: np.ndarray
+    row_spacing_measured: list[float]
+
+
+@dataclass
+class DualArmPlanResult:
+    rows: list[RowModel]
+    arm_paths_lt: list[np.ndarray]
     bounds: tuple[float, float, float, float]
     obstacle_radius: float
     seedling_lt: np.ndarray
@@ -120,15 +134,29 @@ def analyze_rows(seedling_lt: np.ndarray, config: PlannerConfig) -> list[RowMode
         travel = points[indices, 1]
         lateral = points[indices, 0]
         slope, intercept = _robust_line_fit(travel, lateral)
-        sorted_travel = np.sort(travel)
+        sorted_order = np.argsort(travel)
+        sorted_travel = travel[sorted_order]
         spacings = np.diff(sorted_travel)
         close_pairs = int(np.sum(spacings < low)) if spacings.size else 0
         missing_slots = 0
-        for gap in spacings:
+        predicted_missing_lt: list[tuple[float, float]] = []
+        for gap_index, gap in enumerate(spacings):
             if gap > high:
-                missing_slots += max(
+                slot_count = max(
                     1, int(round(float(gap) / config.expected_plant_spacing)) - 1
                 )
+                missing_slots += slot_count
+                start_travel = float(sorted_travel[gap_index])
+                for slot_index in range(1, slot_count + 1):
+                    predicted_travel = start_travel + float(gap) * (
+                        slot_index / (slot_count + 1)
+                    )
+                    predicted_missing_lt.append(
+                        (
+                            float(slope * predicted_travel + intercept),
+                            predicted_travel,
+                        )
+                    )
         rows.append(
             RowModel(
                 index=row_index,
@@ -140,9 +168,154 @@ def analyze_rows(seedling_lt: np.ndarray, config: PlannerConfig) -> list[RowMode
                 missing_slots=missing_slots,
                 close_pairs=close_pairs,
                 spacings=[float(value) for value in spacings],
+                predicted_missing_lt=predicted_missing_lt,
             )
         )
     return rows
+
+
+def _smooth_path_through_knots(
+    knots_lt: np.ndarray,
+    travel_values: np.ndarray,
+) -> np.ndarray:
+    """Cosine-interpolate lateral knots on a strictly forward travel grid."""
+    knots = np.asarray(knots_lt, dtype=np.float64).reshape(-1, 2)
+    output = np.empty((len(travel_values), 2), dtype=np.float64)
+    output[:, 1] = travel_values
+    for index, travel in enumerate(travel_values):
+        right = int(np.searchsorted(knots[:, 1], travel, side="right"))
+        if right <= 0:
+            output[index, 0] = knots[0, 0]
+            continue
+        if right >= len(knots):
+            output[index, 0] = knots[-1, 0]
+            continue
+        left = right - 1
+        span = float(knots[right, 1] - knots[left, 1])
+        if span <= 1e-9:
+            output[index, 0] = knots[right, 0]
+            continue
+        ratio = float((travel - knots[left, 1]) / span)
+        blend = 0.5 - 0.5 * math.cos(math.pi * ratio)
+        output[index, 0] = (
+            float(knots[left, 0])
+            + blend * float(knots[right, 0] - knots[left, 0])
+        )
+    return output
+
+
+def _row_s_path(
+    seedlings: np.ndarray,
+    row: RowModel,
+    travel_values: np.ndarray,
+    config: PlannerConfig,
+) -> np.ndarray:
+    row_points = seedlings[row.point_indices]
+    row_points = row_points[np.argsort(row_points[:, 1])]
+    if len(row_points) < 2:
+        raise ValueError(f"row {row.index} has fewer than two seedlings")
+
+    side = 1 if config.s_first_side >= 0 else -1
+    cluster_gap = config.s_close_cluster_gap
+    if cluster_gap <= 0.0:
+        cluster_gap = 2.0 * config.obstacle_radius + config.path_resolution
+    signs = [side]
+    for previous, current in zip(row_points, row_points[1:]):
+        if float(current[1] - previous[1]) > cluster_gap:
+            side *= -1
+        signs.append(side)
+
+    offset = max(config.s_sweep_offset, config.obstacle_radius)
+    knots = [
+        (
+            row.lateral_at(float(travel_values[0])) + signs[0] * offset,
+            float(travel_values[0]),
+        )
+    ]
+    targets = [
+        (float(point[0]) + sign * offset, float(point[1]))
+        for point, sign in zip(row_points, signs)
+    ]
+    knots.append(targets[0])
+    transition_guard = config.obstacle_radius + config.path_resolution
+    for point_index in range(1, len(targets)):
+        previous_target = targets[point_index - 1]
+        current_target = targets[point_index]
+        if signs[point_index] != signs[point_index - 1]:
+            gap = current_target[1] - previous_target[1]
+            guard = min(transition_guard, 0.45 * gap)
+            knots.append(
+                (previous_target[0], previous_target[1] + guard)
+            )
+            knots.append(
+                (current_target[0], current_target[1] - guard)
+            )
+        knots.append(current_target)
+    knots.append(
+        (
+            row.lateral_at(float(travel_values[-1])) + signs[-1] * offset,
+            float(travel_values[-1]),
+        )
+    )
+    return _smooth_path_through_knots(np.asarray(knots), travel_values)
+
+
+def plan_dual_arm_s(
+    seedling_lt: np.ndarray,
+    config: PlannerConfig,
+) -> DualArmPlanResult:
+    """Plan two synchronized, forward-only S paths, one measured row per arm.
+
+    The vehicle or conveyor supplies the forward motion. Each arm only weaves
+    laterally around the actual seedlings assigned to its row. Nominal planting
+    spacing remains a prediction/diagnostic prior and never creates obstacles.
+    """
+    seedlings = np.asarray(seedling_lt, dtype=np.float64).reshape(-1, 2)
+    seedlings = seedlings[np.isfinite(seedlings).all(axis=1)]
+    rows = analyze_rows(seedlings, config)
+    if len(rows) < 2:
+        raise ValueError("at least two valid seedling rows are required")
+    assigned_rows = [rows[0], rows[-1]]
+
+    travel_margin = max(
+        config.travel_work_margin,
+        config.obstacle_radius + config.path_resolution,
+    )
+    travel_min = float(np.min(seedlings[:, 1]) - travel_margin)
+    travel_max = float(np.max(seedlings[:, 1]) + travel_margin)
+    travel_count = max(
+        2,
+        int(math.ceil((travel_max - travel_min) / config.path_resolution)) + 1,
+    )
+    travel_values = np.linspace(travel_min, travel_max, travel_count)
+    arm_paths = [
+        _row_s_path(seedlings, row, travel_values, config)
+        for row in assigned_rows
+    ]
+
+    for arm_index, path in enumerate(arm_paths, start=1):
+        clearance = minimum_seedling_clearance(path, seedlings)
+        if clearance + 1e-9 < config.obstacle_radius:
+            raise ValueError(
+                f"arm {arm_index} S path clearance {clearance:.3f} m is below "
+                f"{config.obstacle_radius:.3f} m"
+            )
+
+    lateral_min = min(float(np.min(path[:, 0])) for path in arm_paths)
+    lateral_max = max(float(np.max(path[:, 0])) for path in arm_paths)
+    reference_travel = float(np.median(seedlings[:, 1]))
+    row_spacing_measured = [
+        assigned_rows[1].lateral_at(reference_travel)
+        - assigned_rows[0].lateral_at(reference_travel)
+    ]
+    return DualArmPlanResult(
+        rows=assigned_rows,
+        arm_paths_lt=arm_paths,
+        bounds=(lateral_min, lateral_max, travel_min, travel_max),
+        obstacle_radius=config.obstacle_radius,
+        seedling_lt=seedlings,
+        row_spacing_measured=row_spacing_measured,
+    )
 
 
 def _point_is_free(

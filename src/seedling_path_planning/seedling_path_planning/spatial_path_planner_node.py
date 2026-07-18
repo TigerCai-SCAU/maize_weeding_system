@@ -1,4 +1,4 @@
-"""ROS 2 node that turns a fused seedling map into a safe 3D coverage path."""
+"""ROS 2 node that turns a fused seedling map into dual-arm 3D S paths."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point, Pose, PoseArray, PoseStamped
 from nav_msgs.msg import Path
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -28,7 +29,7 @@ from .planner_core import (
     interpolate_terrain_height,
     lateral_travel_height_to_world,
     minimum_seedling_clearance,
-    plan_coverage,
+    plan_dual_arm_s,
     world_to_lateral_travel,
 )
 
@@ -69,6 +70,10 @@ class SpatialPathPlanner(Node):
         )
         self.declare_parameter("path_topic", "/weeding/tool_path")
         self.declare_parameter("work_points_topic", "/weeding/work_points")
+        self.declare_parameter("arm_1_path_topic", "/weeding/arm_1/tool_path")
+        self.declare_parameter("arm_1_work_points_topic", "/weeding/arm_1/work_points")
+        self.declare_parameter("arm_2_path_topic", "/weeding/arm_2/tool_path")
+        self.declare_parameter("arm_2_work_points_topic", "/weeding/arm_2/work_points")
         self.declare_parameter("marker_topic", "/weeding/path_markers")
         self.declare_parameter("status_topic", "/weeding/plan_status")
         self.declare_parameter("world_frame", "camera_init")
@@ -88,6 +93,9 @@ class SpatialPathPlanner(Node):
         self.declare_parameter("lateral_work_margin", 0.10)
         self.declare_parameter("travel_work_margin", 0.05)
         self.declare_parameter("max_grid_cells", 250000)
+        self.declare_parameter("s_sweep_offset", 0.11)
+        self.declare_parameter("s_close_cluster_gap", 0.0)
+        self.declare_parameter("s_first_side", 1)
 
         self.declare_parameter("tool_ground_clearance", 0.02)
         self.declare_parameter("terrain_search_radius", 0.18)
@@ -104,6 +112,14 @@ class SpatialPathPlanner(Node):
         self.work_points_topic = str(
             self.get_parameter("work_points_topic").value
         )
+        self.arm_path_topics = [
+            str(self.get_parameter("arm_1_path_topic").value),
+            str(self.get_parameter("arm_2_path_topic").value),
+        ]
+        self.arm_work_points_topics = [
+            str(self.get_parameter("arm_1_work_points_topic").value),
+            str(self.get_parameter("arm_2_work_points_topic").value),
+        ]
         self.marker_topic = str(self.get_parameter("marker_topic").value)
         self.status_topic = str(self.get_parameter("status_topic").value)
         self.world_frame = str(self.get_parameter("world_frame").value).strip()
@@ -157,6 +173,11 @@ class SpatialPathPlanner(Node):
                 self.get_parameter("travel_work_margin").value
             ),
             max_grid_cells=int(self.get_parameter("max_grid_cells").value),
+            s_sweep_offset=float(self.get_parameter("s_sweep_offset").value),
+            s_close_cluster_gap=float(
+                self.get_parameter("s_close_cluster_gap").value
+            ),
+            s_first_side=int(self.get_parameter("s_first_side").value),
         )
         self.tool_ground_clearance = float(
             self.get_parameter("tool_ground_clearance").value
@@ -204,6 +225,14 @@ class SpatialPathPlanner(Node):
         self.work_points_publisher = self.create_publisher(
             PoseArray, self.work_points_topic, qos_reliable
         )
+        self.arm_path_publishers = [
+            self.create_publisher(Path, topic, qos_reliable)
+            for topic in self.arm_path_topics
+        ]
+        self.arm_work_points_publishers = [
+            self.create_publisher(PoseArray, topic, qos_reliable)
+            for topic in self.arm_work_points_topics
+        ]
         self.marker_publisher = self.create_publisher(
             MarkerArray, self.marker_topic, qos_reliable
         )
@@ -329,7 +358,7 @@ class SpatialPathPlanner(Node):
             seedlings_xyz, self.lateral_axis, self.travel_axis
         )
         try:
-            result = plan_coverage(seedling_lt, self.config)
+            result = plan_dual_arm_s(seedling_lt, self.config)
         except ValueError as exc:
             self._publish_empty_plan()
             self._publish_status(
@@ -344,38 +373,56 @@ class SpatialPathPlanner(Node):
             return
 
         fallback_height = float(np.median(seedlings_xyz[:, self.height_axis]))
-        path_xyz = []
-        for lateral, travel in result.path_lt:
-            height = interpolate_terrain_height(
-                float(lateral),
-                float(travel),
-                terrain_lth,
-                self.terrain_search_radius,
-                fallback_height,
-                self.terrain_nearest_count,
-            )
-            path_xyz.append(
-                lateral_travel_height_to_world(
+        arm_paths_xyz = []
+        for arm_path_lt in result.arm_paths_lt:
+            path_xyz = []
+            for lateral, travel in arm_path_lt:
+                height = interpolate_terrain_height(
                     float(lateral),
                     float(travel),
-                    height + self.tool_ground_clearance,
-                    self.lateral_axis,
-                    self.travel_axis,
-                    self.height_axis,
+                    terrain_lth,
+                    self.terrain_search_radius,
+                    fallback_height,
+                    self.terrain_nearest_count,
                 )
-            )
-        path_xyz_array = np.asarray(path_xyz, dtype=np.float64)
-        clearance = minimum_seedling_clearance(
-            result.path_lt, result.seedling_lt
-        )
+                path_xyz.append(
+                    lateral_travel_height_to_world(
+                        float(lateral),
+                        float(travel),
+                        height + self.tool_ground_clearance,
+                        self.lateral_axis,
+                        self.travel_axis,
+                        self.height_axis,
+                    )
+                )
+            arm_paths_xyz.append(np.asarray(path_xyz, dtype=np.float64))
+        clearances = [
+            minimum_seedling_clearance(path, result.seedling_lt)
+            for path in result.arm_paths_lt
+        ]
         now = self.get_clock().now().to_msg()
-        self._publish_path(path_xyz_array, now)
-        self._publish_markers(result, path_xyz_array, seedlings_xyz, now)
+        # The legacy topics remain aliases for arm 1 so existing visualization
+        # and logging consumers do not break. New control code must use the two
+        # explicit arm topics.
+        self._publish_path(arm_paths_xyz[0], now)
+        for arm_index, path_xyz in enumerate(arm_paths_xyz):
+            self._publish_path(
+                path_xyz,
+                now,
+                self.arm_path_publishers[arm_index],
+                self.arm_work_points_publishers[arm_index],
+            )
+        self._publish_markers(result, arm_paths_xyz, seedlings_xyz, now)
         missing_slots = int(sum(row.missing_slots for row in result.rows))
         close_pairs = int(sum(row.close_pairs for row in result.rows))
-        path_length = float(
-            np.linalg.norm(np.diff(path_xyz_array, axis=0), axis=1).sum()
-        )
+        path_lengths = [
+            float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+            for path in arm_paths_xyz
+        ]
+        predicted_missing = [
+            [list(point) for point in row.predicted_missing_lt]
+            for row in result.rows
+        ]
         self._publish_status(
             {
                 "valid": True,
@@ -394,9 +441,18 @@ class SpatialPathPlanner(Node):
                 "close_or_resown_pairs": close_pairs,
                 "protection_radius_m": self.config.protection_radius,
                 "effective_obstacle_radius_m": result.obstacle_radius,
-                "minimum_path_clearance_m": round(clearance, 4),
-                "path_pose_count": int(len(path_xyz_array)),
-                "path_length_m": round(path_length, 3),
+                "minimum_path_clearance_m": [
+                    round(value, 4) for value in clearances
+                ],
+                "arm_path_pose_counts": [
+                    int(len(path)) for path in arm_paths_xyz
+                ],
+                "arm_path_lengths_m": [
+                    round(value, 3) for value in path_lengths
+                ],
+                "arm_topics": self.arm_path_topics,
+                "legacy_path_alias": "arm_1",
+                "predicted_missing_lt_m": predicted_missing,
                 "terrain_point_count": int(len(terrain_lth)),
                 "source_stamp": (
                     {
@@ -419,6 +475,11 @@ class SpatialPathPlanner(Node):
         poses = PoseArray()
         poses.header = path.header
         self.work_points_publisher.publish(poses)
+        for path_publisher, work_points_publisher in zip(
+            self.arm_path_publishers, self.arm_work_points_publishers
+        ):
+            path_publisher.publish(path)
+            work_points_publisher.publish(poses)
         markers = MarkerArray()
         clear = Marker()
         clear.header.frame_id = self.world_frame
@@ -427,7 +488,13 @@ class SpatialPathPlanner(Node):
         markers.markers.append(clear)
         self.marker_publisher.publish(markers)
 
-    def _publish_path(self, path_xyz: np.ndarray, stamp) -> None:
+    def _publish_path(
+        self,
+        path_xyz: np.ndarray,
+        stamp,
+        path_publisher=None,
+        work_points_publisher=None,
+    ) -> None:
         path_message = Path()
         path_message.header.frame_id = self.world_frame
         path_message.header.stamp = stamp
@@ -456,13 +523,13 @@ class SpatialPathPlanner(Node):
             stamped.pose = pose
             path_message.poses.append(stamped)
             pose_array.poses.append(pose)
-        self.path_publisher.publish(path_message)
-        self.work_points_publisher.publish(pose_array)
+        (path_publisher or self.path_publisher).publish(path_message)
+        (work_points_publisher or self.work_points_publisher).publish(pose_array)
 
     def _publish_markers(
         self,
         result,
-        path_xyz: np.ndarray,
+        arm_paths_xyz: list[np.ndarray],
         seedlings_xyz: np.ndarray,
         stamp,
     ) -> None:
@@ -501,24 +568,28 @@ class SpatialPathPlanner(Node):
             marker.color.a = 0.42
             markers.markers.append(marker)
 
-        path_marker = Marker()
-        path_marker.header.frame_id = self.world_frame
-        path_marker.header.stamp = stamp
-        path_marker.ns = "weeding_coverage_path"
-        path_marker.id = marker_id
-        marker_id += 1
-        path_marker.type = Marker.LINE_STRIP
-        path_marker.action = Marker.ADD
-        path_marker.scale.x = 0.012
-        path_marker.color.r = 0.10
-        path_marker.color.g = 0.55
-        path_marker.color.b = 0.95
-        path_marker.color.a = 0.95
-        for xyz in path_xyz:
-            point = Point()
-            point.x, point.y, point.z = map(float, xyz)
-            path_marker.points.append(point)
-        markers.markers.append(path_marker)
+        path_colors = ((0.10, 0.55, 0.95), (0.58, 0.25, 0.86))
+        for arm_index, path_xyz in enumerate(arm_paths_xyz):
+            path_marker = Marker()
+            path_marker.header.frame_id = self.world_frame
+            path_marker.header.stamp = stamp
+            path_marker.ns = f"arm_{arm_index + 1}_s_path"
+            path_marker.id = marker_id
+            marker_id += 1
+            path_marker.type = Marker.LINE_STRIP
+            path_marker.action = Marker.ADD
+            path_marker.scale.x = 0.012
+            (
+                path_marker.color.r,
+                path_marker.color.g,
+                path_marker.color.b,
+            ) = path_colors[arm_index]
+            path_marker.color.a = 0.95
+            for xyz in path_xyz:
+                point = Point()
+                point.x, point.y, point.z = map(float, xyz)
+                path_marker.points.append(point)
+            markers.markers.append(path_marker)
 
         seedling_lt = result.seedling_lt
         fallback_height = float(np.median(seedlings_xyz[:, self.height_axis]))
@@ -563,7 +634,7 @@ def main() -> None:
     node = SpatialPathPlanner()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
