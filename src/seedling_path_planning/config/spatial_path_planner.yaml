@@ -1,0 +1,41 @@
+spatial_path_planner:
+  ros__parameters:
+    # Existing mapper/terrain interfaces remain unchanged.
+    seedling_map_topic: /seedling/map_points
+    terrain_topic: /ground/global_elevation_points
+    path_topic: /weeding/tool_path
+    work_points_topic: /weeding/work_points
+    marker_topic: /weeding/path_markers
+    status_topic: /weeding/plan_status
+    world_frame: camera_init
+
+    # Vehicle convention: forward x, lateral y, height z.
+    travel_axis: "x"
+    lateral_axis: "y"
+    height_axis: "z"
+
+    # Approximate planting specification. These are priors, not synthetic
+    # obstacles: only actually mapped seedlings receive protection zones.
+    expected_row_spacing: 0.55
+    expected_plant_spacing: 0.20
+    row_cluster_threshold: 0.0  # <=0 derives 40% of expected row spacing
+    plant_spacing_tolerance: 0.35
+    min_plants_per_row: 2
+
+    # Crop protection and coverage geometry.
+    protection_radius: 0.08
+    safety_margin: 0.015
+    coverage_spacing: 0.06
+    path_resolution: 0.02
+    lateral_work_margin: 0.10
+    travel_work_margin: 0.05
+    max_grid_cells: 250000
+
+    # Three-dimensional path height follows the 2.5D terrain map.
+    tool_ground_clearance: 0.02
+    terrain_search_radius: 0.18
+    terrain_nearest_count: 6
+    max_terrain_points: 30000
+
+    replan_period_sec: 1.0
+    minimum_map_points: 4

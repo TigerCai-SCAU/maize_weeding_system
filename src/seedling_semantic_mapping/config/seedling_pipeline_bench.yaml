@@ -101,6 +101,8 @@ seedling_mapper:
     same_stamp_duplicate_policy: skip
     max_same_stamp_history: 20
     tentative_timeout_sec: 10.0
+    reset_service: /seedling/reset_map
+    freeze_service: /seedling/freeze_map
 
 odom_tf_broadcaster:
   ros__parameters:

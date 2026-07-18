@@ -16,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import PointStamped, Pose, PoseArray
 from visualization_msgs.msg import Marker, MarkerArray
+from std_srvs.srv import Empty, SetBool
 
 
 @dataclass
@@ -66,6 +67,8 @@ class SeedlingMapper(Node):
         self.declare_parameter("max_same_stamp_history", 20)
         # 未确认候选点超过该时间未再次观测，就自动删除。
         self.declare_parameter("tentative_timeout_sec", 3.0)
+        self.declare_parameter("reset_service", "/seedling/reset_map")
+        self.declare_parameter("freeze_service", "/seedling/freeze_map")
 
         self.observation_topic = self.get_parameter("observation_topic").value
         self.marker_topic = self.get_parameter("marker_topic").value
@@ -86,6 +89,8 @@ class SeedlingMapper(Node):
         self.tentative_timeout_sec = float(
             self.get_parameter("tentative_timeout_sec").value
         )
+        self.reset_service = str(self.get_parameter("reset_service").value)
+        self.freeze_service = str(self.get_parameter("freeze_service").value)
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -97,9 +102,16 @@ class SeedlingMapper(Node):
         self.sub = self.create_subscription(PointStamped, self.observation_topic, self.obs_cb, qos)
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, qos)
         self.map_points_pub = self.create_publisher(PoseArray, self.map_points_topic, qos)
+        self.reset_server = self.create_service(
+            Empty, self.reset_service, self.reset_map_callback
+        )
+        self.freeze_server = self.create_service(
+            SetBool, self.freeze_service, self.freeze_map_callback
+        )
 
         self.landmarks: List[Landmark] = []
         self.next_id = 1
+        self.map_frozen = False
         self.used_landmarks_by_stamp: Dict[Tuple[int, int], Set[int]] = {}
         self.stamp_history: List[Tuple[int, int]] = []
 
@@ -223,6 +235,8 @@ class SeedlingMapper(Node):
             lm.status = "confirmed"
 
     def obs_cb(self, msg: PointStamped) -> None:
+        if self.map_frozen:
+            return
         if msg.header.frame_id and msg.header.frame_id != self.world_frame:
             self.get_logger().error(
                 f"Observation frame_id is '{msg.header.frame_id}', expected "
@@ -260,6 +274,27 @@ class SeedlingMapper(Node):
         self.publish_map_points(msg.header.stamp)
         if self.save_every_update:
             self.save_csv()
+
+    def reset_map_callback(self, _request, response):
+        self.landmarks.clear()
+        self.used_landmarks_by_stamp.clear()
+        self.stamp_history.clear()
+        self.next_id = 1
+        stamp = self.get_clock().now().to_msg()
+        self.publish_markers(stamp)
+        self.publish_map_points(stamp)
+        self.save_csv()
+        self.get_logger().info("seedling map reset")
+        return response
+
+    def freeze_map_callback(self, request, response):
+        self.map_frozen = bool(request.data)
+        response.success = True
+        response.message = (
+            "seedling map frozen" if self.map_frozen else "seedling map resumed"
+        )
+        self.get_logger().info(response.message)
+        return response
 
     def publish_map_timer_cb(self) -> None:
         """周期发布当前地图。候选点只按传感器时间清理。"""
