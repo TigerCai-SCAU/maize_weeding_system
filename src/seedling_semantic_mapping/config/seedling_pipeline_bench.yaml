@@ -24,7 +24,9 @@ yolo_sep_localizer:
     pending_image_queue_size: 3
     cache_size: 200
 
-    max_terrain_age_sec: 3.0
+    # Bench terrain is physically static. Allow brief CPU scheduling gaps
+    # while YOLO and plane fitting share the Jetson.
+    max_terrain_age_sec: 10.0
     terrain_resolution_m: 0.05
     terrain_vertical_axis: 0
     terrain_horizontal_axes: [1, 2]

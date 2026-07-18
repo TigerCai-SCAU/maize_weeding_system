@@ -1,9 +1,9 @@
 ground_mapper_node:
   ros__parameters:
-    # Bench-only kinematic reinterpretation: /cloud_registered is stationary
-    # in camera_init, but is treated as the initial local scan and translated
-    # by wheel-driven virtual odometry to emulate a moving sensor.
-    cloud_topic: /cloud_registered
+    # Bench-only kinematic reinterpretation: the raw Livox scan is fixed in
+    # the sensor/body frame and translated by wheel-driven virtual odometry
+    # to emulate a sensor moving opposite the conveyor.
+    cloud_topic: /bench/livox_points
     cloud_frame_mode: body
     odom_topic: /bench/aft_mapped_to_init
     map_frame: camera_init

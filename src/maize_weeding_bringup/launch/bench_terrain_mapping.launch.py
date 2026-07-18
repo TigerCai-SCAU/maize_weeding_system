@@ -16,6 +16,22 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription(
         [
+            Node(
+                package="maize_weeding_bringup",
+                executable="livox_custom_to_pointcloud",
+                name="livox_custom_to_pointcloud",
+                output="screen",
+                parameters=[
+                    {
+                        "input_topic": "/livox/lidar",
+                        "output_topic": "/bench/livox_points",
+                        "frame_id": "camera_init",
+                        "min_range_m": 0.8,
+                        "max_range_m": 50.0,
+                        "publish_every_n_scans": 1,
+                    }
+                ],
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(wheel_launch),
             ),

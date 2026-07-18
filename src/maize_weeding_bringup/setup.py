@@ -23,6 +23,11 @@ setup(
     license='MIT',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            (
+                'livox_custom_to_pointcloud = '
+                'maize_weeding_bringup.livox_custom_to_pointcloud:main'
+            ),
+        ],
     },
 )

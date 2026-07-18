@@ -27,9 +27,9 @@ bench_virtual_odom:
     world_frame: "camera_init"
     child_frame: "body"
 
-    # In the current camera_init convention, axis 0 is vertical, axis 1 is
-    # lateral, and vehicle forward is negative axis 2.
-    translation_per_meter: [0.0, 0.0, -1.0]
+    # Positive encoder travel means the belt/seedlings move along body -Z.
+    # The equivalent virtual sensor motion is the opposite direction, +Z.
+    translation_per_meter: [0.0, 0.0, 1.0]
     origin_xyz: [0.0, 0.0, 0.0]
     orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
     zero_on_start: true
