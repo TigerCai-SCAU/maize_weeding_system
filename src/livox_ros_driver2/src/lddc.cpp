@@ -71,9 +71,31 @@ Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
       frame_id_(frame_id) {
   publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
+  imu_diagnostics_epoch_ = std::chrono::steady_clock::now();
 #if 0
   bag_ = nullptr;
 #endif
+}
+#endif
+
+#ifdef BUILDING_ROS2
+void Lddc::ConfigureRos2(
+    const std::string& lidar_qos_reliability, uint32_t lidar_qos_depth,
+    const std::string& imu_qos_reliability, uint32_t imu_qos_depth,
+    double imu_diagnostics_log_period_sec, uint32_t imu_queue_warn_depth,
+    double imu_queue_warn_delay_sec, uint64_t imu_timestamp_gap_warn_ns) {
+  lidar_qos_reliability_ = lidar_qos_reliability;
+  lidar_qos_depth_ = lidar_qos_depth;
+  imu_qos_reliability_ = imu_qos_reliability;
+  imu_qos_depth_ = imu_qos_depth;
+  imu_diagnostics_log_period_sec_ = imu_diagnostics_log_period_sec;
+  imu_queue_warn_depth_ = imu_queue_warn_depth;
+  imu_queue_warn_delay_sec_ = imu_queue_warn_delay_sec;
+  imu_timestamp_gap_warn_ns_ = imu_timestamp_gap_warn_ns;
+  imu_diagnostics_epoch_ = std::chrono::steady_clock::now();
+  if (lds_) {
+    lds_->ConfigureImuDiagnostics(imu_timestamp_gap_warn_ns_);
+  }
 }
 #endif
 
@@ -152,7 +174,14 @@ void Lddc::DistributeImuData(void) {
     uint32_t lidar_id = i;
     LidarDevice *lidar = &lds_->lidars_[lidar_id];
     LidarImuDataQueue *p_queue = &lidar->imu_data;
-    if ((kConnectStateSampling != lidar->connect_state) || (p_queue == nullptr)) {
+    if (p_queue == nullptr) {
+      continue;
+    }
+    if (kConnectStateSampling != lidar->connect_state) {
+      // SDK callbacks begin while the device is still initializing. Publishing
+      // is not valid in this state, and replaying these samples later creates a
+      // stale burst, so discard them and expose the count in diagnostics.
+      lds_->AddImuStartupDrops(p_queue->Clear());
       continue;
     }
     PollingLidarImuData(lidar_id, lidar);
@@ -178,9 +207,15 @@ void Lddc::PollingLidarPointCloudData(uint8_t index, LidarDevice *lidar) {
 
 void Lddc::PollingLidarImuData(uint8_t index, LidarDevice *lidar) {
   LidarImuDataQueue& p_queue = lidar->imu_data;
+#ifdef BUILDING_ROS2
+  MaybeLogImuDiagnostics(p_queue, index);
+#endif
   while (!lds_->IsRequestExit() && !p_queue.Empty()) {
     PublishImuData(p_queue, index);
   }
+#ifdef BUILDING_ROS2
+  MaybeLogImuDiagnostics(p_queue, index);
+#endif
 }
 
 void Lddc::PrepareExit(void) {
@@ -514,6 +549,9 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
 
   if (kOutputToRos == output_type_) {
     publisher_ptr->publish(imu_msg);
+#ifdef BUILDING_ROS2
+    ++imu_published_count_;
+#endif
   } else {
 #ifdef BUILDING_ROS1
     if (bag_ && enable_imu_bag_) {
@@ -524,16 +562,109 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
 }
 
 #ifdef BUILDING_ROS2
+void Lddc::MaybeLogImuDiagnostics(
+    LidarImuDataQueue& imu_data_queue, uint8_t index) {
+  const auto now_steady = std::chrono::steady_clock::now();
+  const auto diagnostics = imu_data_queue.GetDiagnostics();
+  const uint64_t callback_count = lds_->GetImuCallbackCount();
+  const uint64_t enqueue_count = lds_->GetImuEnqueueCount();
+  const uint64_t startup_drop_count = lds_->GetImuStartupDropCount();
+  const int64_t now_ns = cur_node_->get_clock()->now().nanoseconds();
+  double oldest_delay_sec = 0.0;
+  if (diagnostics.oldest_timestamp_ns > 0 &&
+      now_ns > static_cast<int64_t>(diagnostics.oldest_timestamp_ns)) {
+    oldest_delay_sec =
+        (now_ns - diagnostics.oldest_timestamp_ns) / 1e9;
+  }
+
+  const bool backlog_warning =
+      diagnostics.depth >= imu_queue_warn_depth_ ||
+      oldest_delay_sec >= imu_queue_warn_delay_sec_;
+  const bool warn_due =
+      imu_diagnostics_last_warn_.time_since_epoch().count() == 0 ||
+      std::chrono::duration<double>(
+          now_steady - imu_diagnostics_last_warn_).count() >=
+          imu_diagnostics_log_period_sec_;
+  if (backlog_warning && warn_due) {
+    DRIVER_WARN(
+        *cur_node_,
+        "[LIVOX_IMU_BACKLOG] lidar=%u queue_depth=%zu high_water=%" PRIu64
+        " oldest_delay=%.6f sec thresholds(depth=%u delay=%.6f sec)",
+        index, diagnostics.depth, diagnostics.high_water_mark,
+        oldest_delay_sec, imu_queue_warn_depth_, imu_queue_warn_delay_sec_);
+    imu_diagnostics_last_warn_ = now_steady;
+  }
+
+  const bool log_due =
+      imu_diagnostics_last_log_.time_since_epoch().count() == 0 ||
+      std::chrono::duration<double>(
+          now_steady - imu_diagnostics_last_log_).count() >=
+          imu_diagnostics_log_period_sec_;
+  if (!log_due) {
+    return;
+  }
+
+  double elapsed_sec = std::chrono::duration<double>(
+      now_steady -
+      (imu_diagnostics_last_log_.time_since_epoch().count() == 0
+           ? imu_diagnostics_epoch_
+           : imu_diagnostics_last_log_)).count();
+  if (elapsed_sec <= 0.0) {
+    elapsed_sec = 1e-9;
+  }
+  const double callback_hz =
+      (callback_count - last_logged_callback_count_) / elapsed_sec;
+  const double enqueue_hz =
+      (enqueue_count - last_logged_enqueue_count_) / elapsed_sec;
+  const double publish_hz =
+      (imu_published_count_ - last_logged_published_count_) / elapsed_sec;
+  DRIVER_INFO(
+      *cur_node_,
+      "[LIVOX_IMU_STATS] lidar=%u callback=%" PRIu64
+      " callback_hz=%.2f enqueued=%" PRIu64
+      " enqueue_hz=%.2f published=%" PRIu64
+      " publish_hz=%.2f queue_depth=%zu high_water=%" PRIu64
+      " startup_dropped=%" PRIu64
+      " oldest_delay=%.6f sec timestamp_nonmonotonic=%" PRIu64
+      " timestamp_large_gap=%" PRIu64,
+      index, callback_count, callback_hz, enqueue_count, enqueue_hz,
+      imu_published_count_, publish_hz, diagnostics.depth,
+      diagnostics.high_water_mark, startup_drop_count, oldest_delay_sec,
+      diagnostics.timestamp_nonmonotonic,
+      diagnostics.timestamp_large_gap);
+  last_logged_callback_count_ = callback_count;
+  last_logged_enqueue_count_ = enqueue_count;
+  last_logged_published_count_ = imu_published_count_;
+  imu_diagnostics_last_log_ = now_steady;
+}
+
 std::shared_ptr<rclcpp::PublisherBase> Lddc::CreatePublisher(uint8_t msg_type,
     std::string &topic_name, uint32_t queue_size) {
+    (void)queue_size;
+    const bool is_imu = msg_type == kLivoxImuMsg;
+    const uint32_t configured_depth =
+        is_imu ? imu_qos_depth_ : lidar_qos_depth_;
+    const std::string& configured_reliability =
+        is_imu ? imu_qos_reliability_ : lidar_qos_reliability_;
+    rclcpp::QoS qos{rclcpp::KeepLast(configured_depth)};
+    qos.durability_volatile();
+    if (configured_reliability == "best_effort") {
+      qos.best_effort();
+    } else {
+      qos.reliable();
+    }
+    DRIVER_INFO(
+        *cur_node_, "%s QoS: reliability=%s history=keep_last depth=%u",
+        topic_name.c_str(), configured_reliability.c_str(),
+        configured_depth);
     if (kPointCloud2Msg == msg_type) {
       DRIVER_INFO(*cur_node_,
           "%s publish use PointCloud2 format", topic_name.c_str());
-      return cur_node_->create_publisher<PointCloud2>(topic_name, queue_size);
+      return cur_node_->create_publisher<PointCloud2>(topic_name, qos);
     } else if (kLivoxCustomMsg == msg_type) {
       DRIVER_INFO(*cur_node_,
           "%s publish use livox custom format", topic_name.c_str());
-      return cur_node_->create_publisher<CustomMsg>(topic_name, queue_size);
+      return cur_node_->create_publisher<CustomMsg>(topic_name, qos);
     }
 #if 0
     else if (kPclPxyziMsg == msg_type)  {
@@ -545,8 +676,7 @@ std::shared_ptr<rclcpp::PublisherBase> Lddc::CreatePublisher(uint8_t msg_type,
     else if (kLivoxImuMsg == msg_type)  {
       DRIVER_INFO(*cur_node_,
           "%s publish use imu format", topic_name.c_str());
-      return cur_node_->create_publisher<ImuMsg>(topic_name,
-          queue_size);
+      return cur_node_->create_publisher<ImuMsg>(topic_name, qos);
     } else {
       PublisherPtr null_publisher(nullptr);
       return null_publisher;

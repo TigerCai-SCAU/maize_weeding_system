@@ -1,0 +1,17 @@
+/livox/imu:
+  history: keep_last
+  depth: 64
+  reliability: best_effort
+  durability: volatile
+
+/livox/lidar:
+  history: keep_last
+  depth: 32
+  reliability: best_effort
+  durability: volatile
+
+/record/camera/image/compressed:
+  history: keep_last
+  depth: 2
+  reliability: best_effort
+  durability: volatile

@@ -28,6 +28,7 @@
 #include <list>
 #include <mutex>
 #include <cstdint>
+#include <cstddef>
 
 namespace livox_ros {
 
@@ -59,19 +60,37 @@ typedef struct {
   float acc_z;         /**< Accelerometer Z axis, Unit:g */
 } ImuData;
 
+struct ImuQueueDiagnostics {
+  uint64_t pushed = 0;
+  uint64_t popped = 0;
+  uint64_t high_water_mark = 0;
+  uint64_t timestamp_nonmonotonic = 0;
+  uint64_t timestamp_large_gap = 0;
+  uint64_t oldest_timestamp_ns = 0;
+  size_t depth = 0;
+};
+
 class LidarImuDataQueue {
  public:
   void Push(ImuData* imu_data);
   bool Pop(ImuData& imu_data);
   bool Empty();
-  void Clear();
+  size_t Clear();
+  void SetTimestampGapThresholdNs(uint64_t threshold_ns);
+  ImuQueueDiagnostics GetDiagnostics();
 
  private:
   std::mutex mutex_;
   std::list<ImuData> imu_data_queue_;
+  uint64_t pushed_ = 0;
+  uint64_t popped_ = 0;
+  uint64_t high_water_mark_ = 0;
+  uint64_t last_timestamp_ns_ = 0;
+  uint64_t timestamp_gap_threshold_ns_ = 20'000'000;
+  uint64_t timestamp_nonmonotonic_ = 0;
+  uint64_t timestamp_large_gap_ = 0;
 };
 
 } // namespace
 
 #endif // LIVOX_ROS_DRIVER_LIDAR_IMU_DATA_QUEUE_H_
-

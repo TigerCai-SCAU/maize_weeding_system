@@ -25,6 +25,9 @@
 #ifndef LIVOX_ROS_DRIVER2_LDDC_H_
 #define LIVOX_ROS_DRIVER2_LDDC_H_
 
+#include <chrono>
+#include <string>
+
 #include "include/livox_ros_driver2.h"
 
 #include "driver_node.h"
@@ -89,6 +92,13 @@ class Lddc final {
   uint8_t GetTransferFormat(void) { return transfer_format_; }
   uint8_t IsMultiTopic(void) { return use_multi_topic_; }
   void SetRosNode(livox_ros::DriverNode *node) { cur_node_ = node; }
+#ifdef BUILDING_ROS2
+  void ConfigureRos2(
+      const std::string& lidar_qos_reliability, uint32_t lidar_qos_depth,
+      const std::string& imu_qos_reliability, uint32_t imu_qos_depth,
+      double imu_diagnostics_log_period_sec, uint32_t imu_queue_warn_depth,
+      double imu_queue_warn_delay_sec, uint64_t imu_timestamp_gap_warn_ns);
+#endif
 
   // void SetRosPub(ros::Publisher *pub) { global_pub_ = pub; };  // NOT USED
   void SetPublishFrq(uint32_t frq) { publish_frq_ = frq; }
@@ -126,6 +136,8 @@ class Lddc final {
 
 #ifdef BUILDING_ROS2
   PublisherPtr CreatePublisher(uint8_t msg_type, std::string &topic_name, uint32_t queue_size);
+  void MaybeLogImuDiagnostics(
+      LidarImuDataQueue& imu_data_queue, uint8_t index);
 #endif
 
   PublisherPtr GetCurrentPublisher(uint8_t index);
@@ -153,6 +165,21 @@ class Lddc final {
   PublisherPtr global_pub_;
   PublisherPtr private_imu_pub_[kMaxSourceLidar];
   PublisherPtr global_imu_pub_;
+  std::string lidar_qos_reliability_ = "reliable";
+  std::string imu_qos_reliability_ = "reliable";
+  uint32_t lidar_qos_depth_ = 256;
+  uint32_t imu_qos_depth_ = 256;
+  double imu_diagnostics_log_period_sec_ = 5.0;
+  uint32_t imu_queue_warn_depth_ = 100;
+  double imu_queue_warn_delay_sec_ = 0.1;
+  uint64_t imu_timestamp_gap_warn_ns_ = 20'000'000;
+  uint64_t imu_published_count_ = 0;
+  uint64_t last_logged_callback_count_ = 0;
+  uint64_t last_logged_enqueue_count_ = 0;
+  uint64_t last_logged_published_count_ = 0;
+  std::chrono::steady_clock::time_point imu_diagnostics_epoch_;
+  std::chrono::steady_clock::time_point imu_diagnostics_last_log_;
+  std::chrono::steady_clock::time_point imu_diagnostics_last_warn_;
 #endif
 
   livox_ros::DriverNode *cur_node_;

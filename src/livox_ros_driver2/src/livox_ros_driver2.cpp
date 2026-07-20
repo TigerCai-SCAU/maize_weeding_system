@@ -24,6 +24,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
 #include <vector>
 #include <csignal>
 #include <thread>
@@ -127,6 +128,16 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
   double publish_freq = 10.0; /* Hz */
   int output_type = kOutputToRos;
   std::string frame_id;
+  std::string lidar_qos_reliability = "reliable";
+  std::string imu_qos_reliability = "reliable";
+  int lidar_qos_depth = 256;
+  int imu_qos_depth = 256;
+  double imu_diagnostics_log_period_sec = 5.0;
+  int imu_queue_warn_depth = 100;
+  double imu_queue_warn_delay_ms = 100.0;
+  double imu_timestamp_gap_warn_ms = 20.0;
+  int pointcloud_poll_startup_delay_ms = 3000;
+  int imu_poll_startup_delay_ms = 3000;
 
   this->declare_parameter("xfer_format", xfer_format);
   this->declare_parameter("multi_topic", 0);
@@ -137,6 +148,24 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
   this->declare_parameter("user_config_path", "path_default");
   this->declare_parameter("cmdline_input_bd_code", "000000000000001");
   this->declare_parameter("lvx_file_path", "/home/livox/livox_test.lvx");
+  this->declare_parameter(
+      "lidar_qos_reliability", lidar_qos_reliability);
+  this->declare_parameter("lidar_qos_depth", lidar_qos_depth);
+  this->declare_parameter("imu_qos_reliability", imu_qos_reliability);
+  this->declare_parameter("imu_qos_depth", imu_qos_depth);
+  this->declare_parameter(
+      "imu_diagnostics_log_period_sec", imu_diagnostics_log_period_sec);
+  this->declare_parameter(
+      "imu_queue_warn_depth", imu_queue_warn_depth);
+  this->declare_parameter(
+      "imu_queue_warn_delay_ms", imu_queue_warn_delay_ms);
+  this->declare_parameter(
+      "imu_timestamp_gap_warn_ms", imu_timestamp_gap_warn_ms);
+  this->declare_parameter(
+      "pointcloud_poll_startup_delay_ms",
+      pointcloud_poll_startup_delay_ms);
+  this->declare_parameter(
+      "imu_poll_startup_delay_ms", imu_poll_startup_delay_ms);
 
   this->get_parameter("xfer_format", xfer_format);
   this->get_parameter("multi_topic", multi_topic);
@@ -144,6 +173,46 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
   this->get_parameter("publish_freq", publish_freq);
   this->get_parameter("output_data_type", output_type);
   this->get_parameter("frame_id", frame_id);
+  this->get_parameter(
+      "lidar_qos_reliability", lidar_qos_reliability);
+  this->get_parameter("lidar_qos_depth", lidar_qos_depth);
+  this->get_parameter("imu_qos_reliability", imu_qos_reliability);
+  this->get_parameter("imu_qos_depth", imu_qos_depth);
+  this->get_parameter(
+      "imu_diagnostics_log_period_sec", imu_diagnostics_log_period_sec);
+  this->get_parameter("imu_queue_warn_depth", imu_queue_warn_depth);
+  this->get_parameter(
+      "imu_queue_warn_delay_ms", imu_queue_warn_delay_ms);
+  this->get_parameter(
+      "imu_timestamp_gap_warn_ms", imu_timestamp_gap_warn_ms);
+  this->get_parameter(
+      "pointcloud_poll_startup_delay_ms",
+      pointcloud_poll_startup_delay_ms);
+  this->get_parameter(
+      "imu_poll_startup_delay_ms", imu_poll_startup_delay_ms);
+
+  const auto valid_reliability = [](const std::string& value) {
+    return value == "reliable" || value == "best_effort";
+  };
+  if (!valid_reliability(lidar_qos_reliability) ||
+      !valid_reliability(imu_qos_reliability)) {
+    throw std::invalid_argument(
+        "Livox publisher reliability must be reliable or best_effort");
+  }
+  if (lidar_qos_depth <= 0 || imu_qos_depth <= 0 ||
+      imu_diagnostics_log_period_sec <= 0.0 ||
+      imu_queue_warn_depth <= 0 ||
+      imu_queue_warn_delay_ms <= 0.0 ||
+      imu_timestamp_gap_warn_ms <= 0.0 ||
+      pointcloud_poll_startup_delay_ms < 0 ||
+      imu_poll_startup_delay_ms < 0) {
+    throw std::invalid_argument(
+        "Livox QoS and diagnostics parameters must be positive");
+  }
+  pointcloud_poll_startup_delay_ms_ =
+      static_cast<uint32_t>(pointcloud_poll_startup_delay_ms);
+  imu_poll_startup_delay_ms_ =
+      static_cast<uint32_t>(imu_poll_startup_delay_ms);
 
   if (publish_freq > 100.0) {
     publish_freq = 100.0;
@@ -171,18 +240,29 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
 
     LdsLidar *read_lidar = LdsLidar::GetInstance(publish_freq);
     lddc_ptr_->RegisterLds(static_cast<Lds *>(read_lidar));
-
+    lddc_ptr_->ConfigureRos2(
+        lidar_qos_reliability, static_cast<uint32_t>(lidar_qos_depth),
+        imu_qos_reliability, static_cast<uint32_t>(imu_qos_depth),
+        imu_diagnostics_log_period_sec,
+        static_cast<uint32_t>(imu_queue_warn_depth),
+        imu_queue_warn_delay_ms / 1000.0,
+        static_cast<uint64_t>(imu_timestamp_gap_warn_ms * 1e6));
+    DRIVER_INFO(
+        *this,
+        "Livox poll startup delays: pointcloud=%u ms imu=%u ms",
+        pointcloud_poll_startup_delay_ms_, imu_poll_startup_delay_ms_);
     if ((read_lidar->InitLdsLidar(user_config_path))) {
       DRIVER_INFO(*this, "Init lds lidar success!");
     } else {
       DRIVER_ERROR(*this, "Init lds lidar fail!");
     }
+    imudata_poll_thread_ =
+        std::make_shared<std::thread>(&DriverNode::ImuDataPollThread, this);
   } else {
     DRIVER_ERROR(*this, "Invalid data src (%d), please check the launch file", data_src);
   }
 
   pointclouddata_poll_thread_ = std::make_shared<std::thread>(&DriverNode::PointCloudDataPollThread, this);
-  imudata_poll_thread_ = std::make_shared<std::thread>(&DriverNode::ImuDataPollThread, this);
 }
 
 }  // namespace livox_ros
@@ -196,7 +276,10 @@ RCLCPP_COMPONENTS_REGISTER_NODE(livox_ros::DriverNode)
 void DriverNode::PointCloudDataPollThread()
 {
   std::future_status status;
-  std::this_thread::sleep_for(std::chrono::seconds(3));
+  if (pointcloud_poll_startup_delay_ms_ > 0) {
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(pointcloud_poll_startup_delay_ms_));
+  }
   do {
     lddc_ptr_->DistributePointCloudData();
     status = future_.wait_for(std::chrono::microseconds(0));
@@ -206,7 +289,10 @@ void DriverNode::PointCloudDataPollThread()
 void DriverNode::ImuDataPollThread()
 {
   std::future_status status;
-  std::this_thread::sleep_for(std::chrono::seconds(3));
+  if (imu_poll_startup_delay_ms_ > 0) {
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(imu_poll_startup_delay_ms_));
+  }
   do {
     lddc_ptr_->DistributeImuData();
     status = future_.wait_for(std::chrono::microseconds(0));

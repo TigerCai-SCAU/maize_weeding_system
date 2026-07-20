@@ -1,0 +1,10 @@
+health:
+  duration_s: 10.0
+  imu_min_hz: 180.0
+  lidar_min_hz: 9.0
+  lidar_max_hz: 11.0
+  imu_max_header_gap_ms: 20.0
+  imu_max_delay_p95_ms: 100.0
+  imu_max_delay_ms: 250.0
+  imu_subscription_depth: 1000
+  lidar_rate_window: 100

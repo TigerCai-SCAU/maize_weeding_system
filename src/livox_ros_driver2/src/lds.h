@@ -27,6 +27,7 @@
 #ifndef LIVOX_ROS_DRIVER_LDS_H_
 #define LIVOX_ROS_DRIVER_LDS_H_
 
+#include <atomic>
 #include <map>
 
 #include "comm/semaphore.h"
@@ -45,6 +46,11 @@ class Lds {
   void StorageImuData(ImuData* imu_data);
   void StoragePointData(PointFrame* frame);
   void StorageLvxPointData(PointFrame* frame);
+  void ConfigureImuDiagnostics(uint64_t timestamp_gap_threshold_ns);
+  uint64_t GetImuCallbackCount() const;
+  uint64_t GetImuEnqueueCount() const;
+  uint64_t GetImuStartupDropCount() const;
+  void AddImuStartupDrops(uint64_t count);
 
   int8_t GetHandle(const uint8_t lidar_type, const PointPacket* lidar_point);
   void PushLidarData(PointPacket* lidar_data, const uint8_t index, const uint64_t base_time);
@@ -58,8 +64,12 @@ class Lds {
   bool IsAllQueueEmpty();
   bool IsAllQueueReadStop();
 
-  void CleanRequestExit() { request_exit_ = false; }
-  bool IsRequestExit() { return request_exit_; }
+  void CleanRequestExit() {
+    request_exit_.store(false, std::memory_order_relaxed);
+  }
+  bool IsRequestExit() const {
+    return request_exit_.load(std::memory_order_relaxed);
+  }
   virtual void PrepareExit(void);
 
   // get publishing frequency
@@ -75,7 +85,11 @@ class Lds {
   double publish_freq_;
   uint8_t data_src_;
  private:
-  volatile bool request_exit_;
+  std::atomic<bool> request_exit_;
+  std::atomic<uint64_t> imu_callback_count_{0};
+  std::atomic<uint64_t> imu_enqueue_count_{0};
+  std::atomic<uint64_t> imu_startup_drop_count_{0};
+  std::atomic<uint64_t> imu_timestamp_gap_threshold_ns_{20'000'000};
 };
 
 }  // namespace livox_ros

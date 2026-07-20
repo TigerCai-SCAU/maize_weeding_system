@@ -49,6 +49,8 @@ class DriverNode final : public ros::NodeHandle {
   std::shared_ptr<std::thread> imudata_poll_thread_;
   std::shared_future<void> future_;
   std::promise<void> exit_signal_;
+  uint32_t pointcloud_poll_startup_delay_ms_ = 3000;
+  uint32_t imu_poll_startup_delay_ms_ = 3000;
 };
 
 #elif defined BUILDING_ROS2
@@ -70,6 +72,8 @@ class DriverNode final : public rclcpp::Node {
   std::shared_ptr<std::thread> imudata_poll_thread_;
   std::shared_future<void> future_;
   std::promise<void> exit_signal_;
+  uint32_t pointcloud_poll_startup_delay_ms_ = 3000;
+  uint32_t imu_poll_startup_delay_ms_ = 3000;
 };
 #endif
 

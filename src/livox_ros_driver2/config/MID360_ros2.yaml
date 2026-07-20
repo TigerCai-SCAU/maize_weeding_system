@@ -1,0 +1,21 @@
+/**:
+  ros__parameters:
+    # Livox streams are live sensor data. BEST_EFFORT prevents a slow recorder
+    # or subscriber from applying reliable DDS backpressure to the poll thread.
+    lidar_qos_reliability: best_effort
+    lidar_qos_depth: 32
+    imu_qos_reliability: best_effort
+    imu_qos_depth: 64
+
+    # Emit one bounded diagnostic line every five seconds. Warn before an IMU
+    # backlog becomes old enough to invalidate LIO synchronization.
+    imu_diagnostics_log_period_sec: 5.0
+    imu_queue_warn_depth: 100
+    imu_queue_warn_delay_ms: 100.0
+    imu_timestamp_gap_warn_ms: 20.0
+
+    # SDK/device initialization completes before the poll threads are created.
+    # Start IMU polling immediately so the SDK callback cannot build a 3-second
+    # queue. Retain the upstream point-cloud delay to minimize unrelated change.
+    pointcloud_poll_startup_delay_ms: 3000
+    imu_poll_startup_delay_ms: 0

@@ -317,6 +317,12 @@ else(ROS_EDITION STREQUAL "ROS2")
     EXECUTABLE ${PROJECT_NAME}_node
   )
 
+  install(PROGRAMS
+    scripts/check_livox_health.py
+    scripts/record_livox_safe.sh
+    DESTINATION lib/${PROJECT_NAME}
+  )
+
   if(BUILD_TESTING)
     find_package(ament_lint_auto REQUIRED)
     # the following line skips the linter which checks for copyrights

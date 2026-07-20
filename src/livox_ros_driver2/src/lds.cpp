@@ -74,7 +74,7 @@ void Lds::ResetLds(uint8_t data_src) {
 }
 
 void Lds::RequestExit() {
-  request_exit_ = true;
+  request_exit_.store(true, std::memory_order_relaxed);
 }
 
 bool Lds::IsAllQueueEmpty() {
@@ -97,6 +97,7 @@ bool Lds::IsAllQueueReadStop() {
 }
 
 void Lds::StorageImuData(ImuData* imu_data) {
+  imu_callback_count_.fetch_add(1, std::memory_order_relaxed);
   uint32_t device_num = 0;
   if (imu_data->lidar_type == kLivoxLidarType) {
     device_num = imu_data->handle;
@@ -115,11 +116,37 @@ void Lds::StorageImuData(ImuData* imu_data) {
   LidarDevice *p_lidar = &lidars_[index];
   LidarImuDataQueue* imu_queue = &p_lidar->imu_data;
   imu_queue->Push(imu_data);
+  imu_enqueue_count_.fetch_add(1, std::memory_order_relaxed);
   if (!imu_queue->Empty()) {
     if (imu_semaphore_.GetCount() <= 0) {
       imu_semaphore_.Signal();
     }
   }
+}
+
+void Lds::ConfigureImuDiagnostics(uint64_t timestamp_gap_threshold_ns) {
+  imu_timestamp_gap_threshold_ns_.store(
+      timestamp_gap_threshold_ns, std::memory_order_relaxed);
+  for (uint32_t index = 0; index < kMaxSourceLidar; ++index) {
+    lidars_[index].imu_data.SetTimestampGapThresholdNs(
+        timestamp_gap_threshold_ns);
+  }
+}
+
+uint64_t Lds::GetImuCallbackCount() const {
+  return imu_callback_count_.load(std::memory_order_relaxed);
+}
+
+uint64_t Lds::GetImuEnqueueCount() const {
+  return imu_enqueue_count_.load(std::memory_order_relaxed);
+}
+
+uint64_t Lds::GetImuStartupDropCount() const {
+  return imu_startup_drop_count_.load(std::memory_order_relaxed);
+}
+
+void Lds::AddImuStartupDrops(uint64_t count) {
+  imu_startup_drop_count_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void Lds::StorageLvxPointData(PointFrame* frame) {
