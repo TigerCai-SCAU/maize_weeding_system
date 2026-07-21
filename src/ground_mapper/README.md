@@ -1,50 +1,78 @@
-# ground_mapper
+# ground_mapper 0.4.0
 
-`ground_mapper` is a small ROS 2 Humble Python package for extracting ground points and building a local elevation map from FAST-LIVO's registered point cloud.
+Adaptive rolling ground-map package for the maize weeding robot.
 
-The first version is designed for your current maize weeding robot workflow:
+The vehicle installation is configured as:
 
 ```text
-FAST-LIVO
-  /cloud_registered
-  /aft_mapped_to_init
-        ↓
-ground_mapper
-  /ground/points
-  /ground/non_ground_points
-  /ground/elevation_points
-  /ground/elevation_markers
+body x   vertical
+body y   lateral
+body -z  forward
 ```
 
-## Why use `/cloud_registered`?
+FAST-LIVO keeps the complete 360-degree scan for odometry. This package reads
+the already deskewed and registered current scan, then crops only its downstream
+copy to the active work strip.
 
-`/cloud_registered` is already processed by FAST-LIVO. It is registered in the SLAM/map frame and is more suitable for ground elevation mapping than raw `/livox/lidar`.
+## Inputs
 
-Do **not** treat `/cloud_registered` directly as the clean ground surface. It still includes crop points, weeds, sparse outliers, and non-ground points. This package filters them and estimates a local ground height grid.
+```text
+/cloud_registered            (camera_init frame)
+/aft_mapped_to_init
+```
+
+## Outputs
+
+```text
+/ground/points             observed ground returns, camera_init frame
+/ground/non_ground_points  weeds/objects close to the ground
+/ground/elevation_points   dense fitted and locally filled ground surface
+/ground/global_elevation_points  persistent distance/global 2.5D map
+/ground/elevation_markers  RViz visualization
+/ground/plane              [nx, ny, nz, d, rmse, inlier_ratio]
+/ground/sensor_height      online LiDAR height above the plane
+/ground/status             validity and diagnostic summary
+```
 
 ## Algorithm
 
-For each incoming cloud:
+1. Read `/cloud_registered`, which is already in `camera_init`; do not apply the
+   odometry transform to it again.
+2. Match its timestamp to `/aft_mapped_to_init` and keep a short rolling window
+   directly in the map frame.
+3. Transform the window back to the current body frame only for ROI selection
+   and ground fitting.
+4. Crop lateral y to `[-1.5, 1.5]` m and crop along body `-z`.
+5. Fit a coarse plane whose normal is close to body x. It estimates orientation
+   and sensor height but is not published as the final terrain.
+6. Divide raw returns into 5 cm cells and estimate each cell's real terrain
+   height from a low height quantile.
+7. Reject isolated height jumps and interpolate only short gaps near observed
+   terrain cells. Unknown regions remain unknown.
+8. Classify observed ground and near-ground objects relative to the local 2.5D
+   terrain, preserving ridges, depressions, and gradual field undulation.
 
-1. Read `x, y, z` from `/cloud_registered`.
-2. Crop ROI. If odom is available, x/y ROI is centered on the robot pose and aligned with odom yaw.
-3. Split points into XY grid cells.
-4. In each cell, take a low z percentile as the local ground height.
-5. Keep points near the ground height as `/ground/points`.
-6. Publish points significantly above ground as `/ground/non_ground_points`.
-7. Publish one elevation point per valid cell as `/ground/elevation_points`.
+`cloud_frame_mode` defaults to `map`. A `body` compatibility mode remains
+available for a future deskewed body-frame topic, but it is not used by the
+default launch.
 
-This works well when most points are ground and crops are sparse high points.
+Version 0.2.2 keeps the ROS input queues short so stale odometry cannot build
+up behind plane fitting on Jetson. It also re-acquires a valid plane after the
+old plane times out, which handles FAST-LIVO startup pose corrections without
+locking the mapper permanently to the first height estimate.
 
-## Install
+Version 0.3.0 adds a bounded 2.5D persistent ground map. Each 10 cm horizontal
+cell stores one smoothed height, so repeated scans update existing cells instead
+of appending duplicate point clouds.
+
+Version 0.4.0 replaces single-plane surface generation with a real local 2.5D
+terrain estimator. The global/distance map resolution also defaults to 5 cm.
+
+## Build
 
 ```bash
-cd ~/fast_ws/src
-unzip ~/Downloads/ground_mapper.zip
-
-cd ~/fast_ws
+cd ~/maize_weeding_system
 source /opt/ros/humble/setup.bash
-source install/setup.bash
 colcon build --symlink-install --packages-select ground_mapper
 source install/setup.bash
 ```
@@ -55,77 +83,69 @@ source install/setup.bash
 ros2 launch ground_mapper ground_mapper.launch.py
 ```
 
-## Check topics
+The default is the bounded `distance` mode with 5 m retained behind and ahead.
+
+### Map retention modes
+
+Local rolling window only (lowest memory):
 
 ```bash
-ros2 topic hz /cloud_registered
-ros2 topic hz /ground/points
-ros2 topic hz /ground/elevation_points
+ros2 launch ground_mapper ground_mapper.launch.py map_mode:=rolling
 ```
 
-Check one message:
+Keep 5 m behind and 5 m ahead of the vehicle:
 
 ```bash
-ros2 topic echo /ground/elevation_points --field width --qos-reliability best_effort --once
+ros2 launch ground_mapper ground_mapper.launch.py \
+  map_mode:=distance \
+  map_keep_behind_m:=5.0 \
+  map_keep_ahead_m:=5.0
 ```
 
-## RViz
-
-Add these displays:
-
-- `PointCloud2`: `/cloud_registered`, original FAST-LIVO cloud.
-- `PointCloud2`: `/ground/points`, extracted ground points.
-- `PointCloud2`: `/ground/non_ground_points`, crop/weed/outlier points.
-- `PointCloud2`: `/ground/elevation_points`, one point per grid cell.
-- `MarkerArray`: `/ground/elevation_markers`, elevation grid visualization.
-
-## Important parameters
-
-Edit:
+Keep the complete map for the current session:
 
 ```bash
-gedit ~/fast_ws/src/ground_mapper/config/ground_mapper.yaml
+ros2 launch ground_mapper ground_mapper.launch.py \
+  map_mode:=global
 ```
 
-Typical first values:
+For `distance` and `global`, display
+`/ground/global_elevation_points` in RViz with Best Effort QoS. The topic
+contains the complete retained map on every publication, so RViz Decay Time
+should remain zero.
 
-```yaml
-grid_resolution: 0.03
-height_percentile: 20.0
-min_points_per_cell: 3
-ground_keep_above: 0.04
-ground_keep_below: 0.03
-non_ground_above: 0.06
+Save the retained map on demand:
+
+```bash
+ros2 service call /ground/save_map std_srvs/srv/Trigger "{}"
 ```
 
-Tuning guide:
+Clear it without restarting:
 
-- Crop/crop leaf points remain in `/ground/points`: lower `ground_keep_above` to `0.03`, or lower `height_percentile` to `10.0`.
-- Too many real ground points are removed: raise `ground_keep_above` to `0.05`.
-- Elevation map has holes: increase `grid_resolution` to `0.05` or lower `min_points_per_cell` to `2`.
-- CPU is high: set `process_every_n_clouds: 2` or `max_points_per_cloud: 30000`.
-
-## Relationship with seedling map
-
-`ground_mapper` is separate from `seedling_semantic_mapping`.
-
-Later path planning should use:
-
-```text
-/seedling/map_points
-/ground/elevation_points
+```bash
+ros2 service call /ground/clear_map std_srvs/srv/Trigger "{}"
 ```
 
-For each planned tool XY point:
+To save automatically on Ctrl-C:
 
-```text
-tool_z = ground_height(x, y) - target_depth
+```bash
+ros2 launch ground_mapper ground_mapper.launch.py \
+  map_mode:=global \
+  save_map_on_shutdown:=true \
+  save_map_path:=/tmp/ground_global_map.csv
 ```
 
-For 2 cm tillage depth:
+## Check
 
-```text
-tool_z = ground_height(x, y) - 0.02
+```bash
+ros2 topic echo /ground/status --once
+ros2 topic echo /ground/sensor_height --once
+ros2 topic echo /ground/points --field width \
+  --qos-reliability best_effort --once
+ros2 topic echo /ground/elevation_points --field width \
+  --qos-reliability best_effort --once
 ```
 
-Confirm your map z-axis direction before using this for real actuator control.
+The first version models the local work area as one robust plane. A later
+version can add a piecewise 2.5D surface for strongly uneven soil while keeping
+the same topics.

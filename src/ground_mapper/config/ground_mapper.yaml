@@ -1,45 +1,109 @@
 ground_mapper_node:
   ros__parameters:
-    # FAST-LIVO registered point cloud. First version uses this directly.
+    # FAST-LIVO registered current scan. It is already deskewed and expressed
+    # in camera_init, so this package must not transform it into the map again.
     cloud_topic: /cloud_registered
+    cloud_frame_mode: map
     odom_topic: /aft_mapped_to_init
+    map_frame: camera_init
+    body_frame: body
 
     ground_points_topic: /ground/points
     non_ground_points_topic: /ground/non_ground_points
     elevation_points_topic: /ground/elevation_points
+    global_elevation_points_topic: /ground/global_elevation_points
     elevation_markers_topic: /ground/elevation_markers
+    plane_topic: /ground/plane
+    sensor_height_topic: /ground/sensor_height
+    status_topic: /ground/status
 
-    # If true, x/y ROI is centered on odom pose and aligned with odom yaw.
-    # If no odom arrives yet, node falls back to fixed-frame ROI temporarily.
-    use_odom_roi: true
+    # Actual MID360 installation on the vehicle:
+    #   body x: vertical (the sign is detected from the fitted plane)
+    #   body y: lateral
+    #   body -z: vehicle forward
+    vertical_axis: 0
+    lateral_axis: 1
+    forward_axis: 2
+    forward_sign: -1.0
 
-    # ROI in body-local coordinates when use_odom_roi=true.
-    # x is forward, y is left/right if /aft_mapped_to_init orientation is correct.
-    roi_x_min: -1.0
-    roi_x_max: 4.0
-    roi_y_min: -1.5
-    roi_y_max: 1.5
+    # Active work strip. Keep the full 360 degree cloud inside FAST-LIVO; this
+    # ROI is applied only to the downstream ground-map copy.
+    lateral_min_m: -1.5
+    lateral_max_m: 1.5
+    forward_min_m: -1.0
+    forward_max_m: 5.0
 
-    # z is in the cloud/map frame. Adjust after checking /cloud_registered z range.
-    roi_z_min: -3.0
-    roi_z_max: 1.0
+    # Rolling accumulation for MID360's non-repetitive registered scans.
+    window_sec: 1.5
+    # Keep the first Jetson version light enough that ROS callbacks stay
+    # current. The map does not need camera-rate publication.
+    publish_rate_hz: 1.0
+    input_voxel_size_m: 0.05
+    max_points_per_scan: 12000
+    max_rolling_points: 50000
+    odom_cache_size: 300
+    max_cloud_odom_dt_sec: 0.30
 
-    # Grid ground estimator.
-    grid_resolution: 0.03
-    height_percentile: 20.0
-    min_points_per_cell: 3
+    # Adaptive ground plane. Its normal must be close to body x, while its sign
+    # and the LiDAR height are inferred automatically.
+    ransac_iterations: 20
+    ransac_sample_points: 2000
+    ransac_distance_m: 0.08
+    max_normal_angle_deg: 35.0
+    min_plane_inliers: 250
+    min_plane_inlier_ratio: 0.05
+    max_plane_rmse_m: 0.12
+    min_sensor_height_m: 0.25
+    max_sensor_height_m: 3.0
+    max_height_jump_m: 0.20
+    plane_smoothing_alpha: 0.20
+    # After this timeout, a valid new fit may re-initialize the plane. This is
+    # needed when FAST-LIVO changes its provisional startup pose.
+    plane_timeout_sec: 3.0
 
-    # A point is treated as ground if it is close to the low-percentile ground height.
-    ground_keep_above: 0.04
-    ground_keep_below: 0.03
+    # Signed height relative to the local 2.5D terrain. Positive is above the
+    # terrain toward the LiDAR, regardless of body +x direction.
+    ground_below_margin_m: 0.10
+    ground_above_margin_m: 0.06
+    non_ground_min_height_m: 0.06
+    max_object_height_m: 0.60
 
-    # A point above the estimated ground by this threshold is published as non-ground.
-    non_ground_above: 0.06
+    # The RANSAC plane above is only a coarse reference. Real terrain height is
+    # estimated independently in each 5 cm cell from the low quantile of raw
+    # returns, preserving ridges and depressions.
+    terrain_coarse_below_m: 0.35
+    terrain_coarse_above_m: 0.30
+    terrain_height_quantile: 0.20
+    terrain_min_points_per_cell: 2
+    terrain_max_neighbor_jump_m: 0.12
+    terrain_min_neighbor_cells: 2
+    terrain_min_fill_neighbors: 2
 
-    # Performance / visualization.
-    process_every_n_clouds: 1
-    max_points_per_cloud: 0      # 0 = no cap; set 30000 if CPU is high
+    # Empty cells are interpolated only near real terrain observations.
+    grid_resolution_m: 0.05
+    max_fill_distance_m: 0.15
+    publish_full_plane_roi: false
+    max_dense_cells: 12000
+
+    # Persistent-map policy:
+    #   rolling  only publish the current local window
+    #   distance keep a bounded map around the vehicle
+    #   global   keep the complete map for the current session
+    # distance is the recommended bounded default for field operation.
+    map_mode: distance
+    map_resolution_m: 0.05
+    map_keep_behind_m: 5.0
+    map_keep_ahead_m: 5.0
+    map_max_cells: 300000
+    map_height_smoothing_alpha: 0.20
+    map_publish_rate_hz: 0.5
+
+    # Call /ground/save_map at any time. When enabled, Ctrl-C also saves the
+    # current persistent map to this CSV path.
+    save_map_path: /tmp/ground_global_map.csv
+    save_map_on_shutdown: false
+
     publish_non_ground: true
-    publish_elevation_markers: true
-    marker_max_cells: 4000
+    publish_markers: false
+    marker_max_points: 5000
     log_debug: true
